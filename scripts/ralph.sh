@@ -638,16 +638,23 @@ VERIFY
 # Retorna 0 quando detecta limite, 1 quando nao ha limite.
 detect_usage_limit() {
   local log_file="$1"
-  local tail_txt pattern epoch
+  local tail_txt pattern epoch human now
 
   # A mensagem de limite sai no FIM da execucao. Olhar o log inteiro faz output
   # de teste do projeto ("429", "Too Many Requests") disparar espera de 30min.
   tail_txt=$(tail -n 20 "$log_file" 2>/dev/null || true)
 
+  # O Claude Code nao tem UMA mensagem de limite. Ja foram vistas:
+  #   "Claude AI usage limit reached|1753362600"          (epoch cru)
+  #   "You've hit your session limit · resets 11:10am"    (horario humano)
+  #   "5-hour limit reached"
+  # O denominador comum e api_error_status 429 no JSON de resultado — casar so
+  # a frase deixa o limite passar por gate 0 e queima todos os ciclos de
+  # correcao em segundos, que e exatamente o que o invariante 4 evita.
   if [[ "$ENGINE" == "claude" ]]; then
-    pattern='usage limit reached'
+    pattern='usage limit reached|hit your (session|usage|[0-9]+-hour) limit|[0-9]+-hour limit reached|"api_error_status"[[:space:]]*:[[:space:]]*429'
   else
-    pattern='rate limit reached|quota exceeded|usage limit reached'
+    pattern='rate limit reached|quota exceeded|usage limit reached|too many requests'
   fi
 
   grep -qiE "$pattern" <<< "$tail_txt" || return 1
@@ -660,6 +667,19 @@ detect_usage_limit() {
       | grep -oE '[0-9]{10,13}' | tail -1 || true)
   fi
 
+  # Horario humano ("resets 11:10am", "resets at 3pm"): resolve para a proxima
+  # ocorrencia. Sem isso o run cai no fallback de 30min mesmo sabendo a hora.
+  if [ -z "$epoch" ]; then
+    human=$(grep -oiE 'resets?[[:space:]]+(at[[:space:]]+)?[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)' <<< "$tail_txt" \
+      | grep -oiE '[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)' | tail -1 || true)
+    if [ -n "$human" ]; then
+      epoch=$(date -d "$human" +%s 2>/dev/null || true)
+      now=$(date +%s)
+      if [ -n "$epoch" ] && [ "$epoch" -le "$now" ]; then
+        epoch=$(date -d "tomorrow $human" +%s 2>/dev/null || echo "$epoch")
+      fi
+    fi
+  fi
   echo "${epoch:-0}"
   return 0
 }
