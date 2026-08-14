@@ -54,7 +54,7 @@
 #      nao escreveu nada (claim "ja implementada"), ciclo de correcao, ou
 #      gate 2 desabilitado. --no-verify / RALPH_VERIFY=off desliga. No engine
 #      claude o verificador usa um modelo barato (RALPH_VERIFY_MODEL, default:
-#      haiku) — e leitura + checklist.
+#      sonnet) — e leitura + checklist.
 #
 # Gates verdes com a arvore limpa => a fase ja estava implementada em HEAD:
 # marcada como feita, sem commit (nao ha o que commitar).
@@ -79,7 +79,7 @@
 # Variaveis de ambiente:
 #   RALPH_TEST_CMD           comando de teste (gate 2); --test-cmd tem prioridade
 #   RALPH_VERIFY             gate 3: always (default) | auto | off
-#   RALPH_VERIFY_MODEL       modelo do verificador (default: haiku no claude)
+#   RALPH_VERIFY_MODEL       modelo do verificador (default: sonnet no claude)
 #   RALPH_MAX_CYCLES         ciclos de correcao por fase (default: 3)
 #   RALPH_MAX_LIMIT_WAITS    esperas consecutivas por limite, por fase (default: 20)
 #   RALPH_LIMIT_WAIT_DEFAULT fallback de espera em segundos (default: 1800)
@@ -354,7 +354,7 @@ preflight_checks() {
   if [ -n "${RALPH_VERIFY_MODEL:-}" ]; then
     VERIFY_MODEL="$RALPH_VERIFY_MODEL"
   elif [[ "$ENGINE" == "claude" ]]; then
-    VERIFY_MODEL="haiku"
+    VERIFY_MODEL="sonnet"
   fi
 
   if ! command -v "$ENGINE" &> /dev/null; then
