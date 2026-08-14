@@ -622,6 +622,23 @@ Regras:
 - Codigo ausente, TODO, placeholder ou teste faltando => INCOMPLETE.
 - Na duvida, INCOMPLETE.
 
+Execucao (headless — leia com atencao):
+- Voce roda em sessao nao-interativa: o processo MORRE quando este turno acaba.
+  Nao existe turno seguinte, nao existe notificacao de tarefa concluida.
+- NUNCA rode nada em background (`run_in_background`, `&`, `nohup`) nem espere
+  por notificacao de conclusao. O resultado nunca chegara e a fase sera reprovada
+  por falta das linhas TASK.
+- Rode comandos apenas de forma SINCRONA e apenas se forem rapidos (segundos):
+  `grep`, `ls`, `route:list`, `schedule:list`, `test --filter=<Arquivo>`.
+- NAO rode a suite completa (`artisan test` sem filtro): ela leva dezenas de
+  minutos e nao cabe neste gate. Para tasks cujo criterio e "suite verde",
+  verifique pela EXISTENCIA e pelo CONTEUDO dos testes exigidos e pelo log de
+  teste da propria fase, e emita o veredito com base nisso.
+- Emitir as linhas TASK e a ULTIMA coisa que voce faz e e OBRIGATORIO. Terminar o
+  turno sem elas reprova a fase, mesmo que o codigo esteja correto. Se ficou sem
+  evidencia suficiente para alguma task, emita INCOMPLETE para ela — nunca
+  termine o turno anunciando que vai aguardar algo.
+
 ## Fase a verificar
 VERIFY
     cat "$PHASES_DIR/$phase_file"
