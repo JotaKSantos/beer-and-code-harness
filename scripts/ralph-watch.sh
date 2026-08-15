@@ -254,20 +254,24 @@ W=100
 calc_width() {
   local cols="${RALPH_WATCH_COLS:-}"
 
-  [ -n "$cols" ] || cols=$(tput cols 2>/dev/null || true)
-
-  if ! [[ "$cols" =~ ^[0-9]+$ ]] || [ "$cols" -lt 40 ]; then
+  # stty PRIMEIRO: le o tamanho real do terminal por ioctl. `tput cols` parece
+  # funcionar mas devolve o 80 do terminfo quando nao consegue determinar o
+  # tamanho — e 80 e um numero plausivel, entao passava batido e o painel
+  # ficava com metade da largura num terminal largo.
+  if ! [[ "$cols" =~ ^[0-9]+$ ]]; then
     cols=$(stty size < /dev/tty 2>/dev/null | cut -d' ' -f2 || true)
+  fi
+  if ! [[ "$cols" =~ ^[0-9]+$ ]] || [ "$cols" -lt 40 ]; then
+    cols=$(tput cols 2>/dev/null || true)
   fi
   if ! [[ "$cols" =~ ^[0-9]+$ ]] || [ "$cols" -lt 40 ]; then
     cols="${COLUMNS:-}"
   fi
   [[ "$cols" =~ ^[0-9]+$ ]] || cols=100
 
+  # Sem teto artificial: o painel acompanha o terminal. calc_width roda a cada
+  # frame, entao redimensionar a janela reflete no desenho seguinte.
   W=$cols
-  # Teto alto: a tabela ganha em legibilidade com a largura toda, e o titulo da
-  # task e a primeira coisa a ser cortada quando falta espaco.
-  [ "$W" -gt 200 ] && W=200
   [ "$W" -lt 64 ] && W=64
 }
 
@@ -290,14 +294,16 @@ phase_counts() {
   done
 }
 
+# Todas as tasks do run, nao so as da fase corrente: a barra mede o progresso
+# do trabalho inteiro, do mesmo jeito que a de fases.
 task_counts() {
-  local num i cur="${META[phase_cur]:-}"
+  local num i
   TK_DONE=0; TK_TOTAL=0
-  [ -n "$cur" ] || { for num in "${PHASE_NUMS[@]}"; do cur="$num"; break; done; }
-  [ -n "$cur" ] || return 0
-  for ((i=1; i<=${TK_COUNT[$cur]:-0}; i++)); do
-    TK_TOTAL=$((TK_TOTAL + 1))
-    [ "${TK_STATUS[$cur:$i]:-pending}" = "done" ] && TK_DONE=$((TK_DONE + 1))
+  for num in "${PHASE_NUMS[@]}"; do
+    for ((i=1; i<=${TK_COUNT[$num]:-0}; i++)); do
+      TK_TOTAL=$((TK_TOTAL + 1))
+      [ "${TK_STATUS[$num:$i]:-pending}" = "done" ] && TK_DONE=$((TK_DONE + 1))
+    done
   done
 }
 

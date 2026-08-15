@@ -802,14 +802,20 @@ stream_watch() {
   }
 
   # Reserva: o agente escreveu o arquivo da task N. Marca N em andamento e da
-  # por concluidas as anteriores que ele ja tocou — ele trabalha em ordem, e o
-  # gate 3 corrige o palpite no fim da fase de qualquer jeito.
+  # TODAS as anteriores por concluidas — inclusive as que nunca casaram com um
+  # arquivo. Nem toda task cita um: "adicionar as operacoes plus/minus/times a
+  # App\Money" e feita dentro do arquivo da task anterior. Promover so as que
+  # foram tocadas deixava essas pendentes ate o fim da fase, e o painel dava um
+  # salto de "Pendente" direto para "Concluida", como se nunca tivessem rodado.
+  #
+  # E um palpite baseado na ordem em que o agente trabalha; o gate 3 corrige no
+  # fim da fase, e uma task realmente nao feita volta como INCOMPLETE.
   sw_infer_from_file() {
     local path="$1" n i
     [ "$agent_list_used" -eq 1 ] && return 0
     n=$(sw_task_for_file "$path") || return 0
     for ((i = 1; i < n; i++)); do
-      [ "${st[$i]:-}" = "running" ] && st["$i"]="done"
+      st["$i"]="done"
     done
     [ "${st[$n]:-}" = "done" ] || st["$n"]="running"
     [ "$n" -gt "$inferred_max" ] && inferred_max="$n"

@@ -985,6 +985,60 @@ STREAM
 fi
 
 # ---------------------------------------------------------------------------
+# 31. REGRESSAO: task do MEIO que nao cita arquivo nenhum. Caso real — "adicionar
+#     as operacoes plus/minus/times a App\Money" acontece dentro do arquivo da
+#     task anterior. Ela nao pode ficar pendente ate o fim da fase e depois
+#     saltar direto para concluida, como se nunca tivesse rodado.
+# ---------------------------------------------------------------------------
+if case_enabled task-fallback-middle; then
+  header "31. task do meio sem arquivo proprio nao fica para tras"
+  d="$TMP/task-fallback-middle"
+  mkdir -p "$d/.phases"
+
+  cat > "$d/.phases/phase-09.md" <<'PH'
+## Phase 9: Money
+
+- [ ] **Task:** criar `src/Money.php` com a classe `App\Money`
+- [ ] **Task:** adicionar as operações `plus`, `minus` e `times` a `App\Money`
+- [ ] **Task:** criar `tests/MoneyTest.php` cobrindo `App\Money`
+PH
+
+  # O agente escreveu 2 arquivos para 3 tasks — exatamente o run real.
+  cat > "$d/stream.jsonl" <<'STREAM'
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/repo/src/Money.php","content":"..."}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/repo/tests/MoneyTest.php","content":"..."}}]}}
+{"type":"result","subtype":"success","is_error":false}
+STREAM
+
+  (
+    RALPH_LIB_ONLY=1
+    export RALPH_LIB_ONLY
+    # shellcheck disable=SC1090
+    source "$RALPH" 2>/dev/null
+    set +e
+    PHASES_DIR="$d/.phases"
+    stream_watch "$d/live.tsv" 9 1 phase-09.md < "$d/stream.jsonl" > /dev/null
+  )
+
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t1\tdone')" "task 1 concluida"
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t2\tdone')" "task 2 (sem arquivo proprio) NAO ficou pendente"
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t3\trunning')" "task 3 em execucao"
+fi
+
+# ---------------------------------------------------------------------------
+# 32. A barra de tasks mede o run inteiro, nao so a fase corrente.
+# ---------------------------------------------------------------------------
+if case_enabled watch-task-total; then
+  header "32. barra de tasks conta todas as fases"
+  d=$(new_case watch-task-total)
+  run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" > /dev/null
+  # fixture: fase 1 com 2 tasks + fase 2 com 1 task = 3 no total
+  RALPH_WATCH_COLS=110 "$ROOT/scripts/ralph-watch.sh" --once --no-color "$d/repo" > "$d/panel.txt" 2>&1
+  assert_contains "$d/panel.txt" "Tasks  3/3" "total soma as tasks de todas as fases"
+  assert_contains "$d/panel.txt" "Fases  2/2" "total de fases"
+fi
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$FAIL" -eq 0 ]; then
