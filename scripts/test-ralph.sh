@@ -68,6 +68,7 @@ bump() {
 }
 
 model=""
+outfmt=""
 
 if [ "$name" = "claude" ]; then
   # claude -p real le stdin quando nao e TTY: se o ralph nao redirecionar
@@ -78,7 +79,7 @@ if [ "$name" = "claude" ]; then
       -p) prompt="$2"; shift 2 ;;
       --allowedTools) verify=1; shift 2 ;;
       --model) model="$2"; shift 2 ;;
-      --output-format) shift 2 ;;
+      --output-format) outfmt="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
@@ -130,6 +131,25 @@ n=$(bump impl_calls)
 emit_claude_ok()    { echo '{"type":"result","subtype":"success","is_error":false,"result":"implementado"}'; }
 emit_claude_limit() { echo "{\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\"result\":\"Claude AI usage limit reached|$1\"}"; }
 
+# Reproduz o stream-json real do claude para a lista de tarefas do agente:
+# TaskCreate (sem id) -> tool_result com o id -> TaskUpdate por transicao.
+# E disso que o ralph tira o progresso por task em tempo real.
+emit_stream_tasks() {
+  local total="$1" complete_up_to="$2" i
+  echo '{"type":"system","subtype":"init","session_id":"mock"}'
+  for i in $(seq 1 "$total"); do
+    echo "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"TaskCreate\",\"input\":{\"subject\":\"task $i\"}}]}}"
+    echo "{\"type\":\"user\",\"tool_use_result\":{\"task\":{\"id\":\"$i\",\"subject\":\"task $i\"}}}"
+  done
+  for i in $(seq 1 "$total"); do
+    echo "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"TaskUpdate\",\"input\":{\"taskId\":\"$i\",\"status\":\"in_progress\"}}]}}"
+    echo "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"run\",\"description\":\"rodando os testes da task $i\"}}]}}"
+    if [ "$i" -le "$complete_up_to" ]; then
+      echo "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"TaskUpdate\",\"input\":{\"taskId\":\"$i\",\"status\":\"completed\"}}]}}"
+    fi
+  done
+}
+
 case "$scenario" in
   limit-epoch)
     if [ "$n" -eq 1 ]; then
@@ -165,7 +185,28 @@ if [ "$scenario" = "false-429" ]; then
   exit 0
 fi
 
-if [ "$name" = "claude" ]; then emit_claude_ok; else echo "Done."; fi
+if [ "$name" = "claude" ]; then
+  if [ "$outfmt" = "stream-json" ]; then
+    n_tasks=$(grep -cE '^[[:space:]]*- \[[ x]\]' <<< "$prompt")
+    if [ "$scenario" = "stream-slow" ]; then
+      # Para o exterior a sessao e uma caixa preta que demora: emite a 1a task
+      # concluida e a 2a em andamento, SEGURA, e so entao termina. E a janela em
+      # que o teste observa o painel a meio caminho.
+      emit_stream_tasks 1 1
+      echo "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"TaskCreate\",\"input\":{\"subject\":\"task 2\"}}]}}"
+      echo "{\"type\":\"user\",\"tool_use_result\":{\"task\":{\"id\":\"2\",\"subject\":\"task 2\"}}}"
+      echo "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"TaskUpdate\",\"input\":{\"taskId\":\"2\",\"status\":\"in_progress\"}}]}}"
+      touch "$state/slow_midpoint"
+      sleep "${MOCK_SLOW_SECS:-4}"
+      echo "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"TaskUpdate\",\"input\":{\"taskId\":\"2\",\"status\":\"completed\"}}]}}"
+    else
+      emit_stream_tasks "$n_tasks" "$n_tasks"
+    fi
+  fi
+  emit_claude_ok
+else
+  echo "Done."
+fi
 exit 0
 MOCK
 
@@ -286,6 +327,10 @@ run_ralph() {
   local rc=0
   (
     cd "$dir/repo" || exit 1
+    # -u RALPH_TEST_CMD / RALPH_MAX_CYCLES: o dev pode ter essas exportadas no
+    # shell (ex: RALPH_TEST_CMD no .zshrc). Herda-las aqui sobrepoe a deteccao
+    # por manifest e quebra os casos 13/16 com uma falha que nao existe no ralph.
+    env -u RALPH_TEST_CMD -u RALPH_MAX_CYCLES -u RALPH_MAX_LIMIT_WAITS \
     PATH="$dir/bin:$PATH" \
     MOCK_STATE="$dir/state" \
     MOCK_SCENARIO="$scenario" \
@@ -560,11 +605,11 @@ if case_enabled verify-auto; then
 fi
 
 # ---------------------------------------------------------------------------
-# 21. Verificador roda com modelo barato: haiku por default no claude,
+# 21. Verificador roda com modelo barato: sonnet por default no claude,
 #     RALPH_VERIFY_MODEL sobrepoe.
 # ---------------------------------------------------------------------------
 if case_enabled verify-model; then
-  header "21. verificador usa modelo barato (haiku default, env sobrepoe)"
+  header "21. verificador usa modelo barato (sonnet default, env sobrepoe)"
   d=$(new_case verify-model)
   # fase ja implementada em HEAD: sessao nao escreve -> gate 3 roda em auto
   mkdir -p "$d/repo/src"
@@ -572,16 +617,16 @@ if case_enabled verify-model; then
   git -C "$d/repo" add -A && git -C "$d/repo" commit -q -m "feat: trabalho previo"
   rc=$(run_ralph "$d" already-done --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
   assert_eq 0 "$rc" "exit 0"
-  assert_eq "haiku" "$(cat "$d/state/verify_model" 2>/dev/null)" "verify chamado com --model haiku"
-  assert_contains "$d/out.log" "modelo: haiku" "log do gate 3 informa o modelo"
+  assert_eq "sonnet" "$(cat "$d/state/verify_model" 2>/dev/null)" "verify chamado com --model sonnet"
+  assert_contains "$d/out.log" "modelo: sonnet" "log do gate 3 informa o modelo"
 
   d2=$(new_case verify-model-override)
   mkdir -p "$d2/repo/src"
   echo "impl previo" > "$d2/repo/src/impl-1.txt"
   git -C "$d2/repo" add -A && git -C "$d2/repo" commit -q -m "feat: trabalho previo"
-  rc=$(CASE_VERIFY_MODEL=sonnet run_ralph "$d2" already-done --engine claude --test-cmd "$d2/test.sh" --max-cycles 1)
+  rc=$(CASE_VERIFY_MODEL=haiku run_ralph "$d2" already-done --engine claude --test-cmd "$d2/test.sh" --max-cycles 1)
   assert_eq 0 "$rc" "exit 0 (override)"
-  assert_eq "sonnet" "$(cat "$d2/state/verify_model" 2>/dev/null)" "RALPH_VERIFY_MODEL sobrepoe o default"
+  assert_eq "haiku" "$(cat "$d2/state/verify_model" 2>/dev/null)" "RALPH_VERIFY_MODEL sobrepoe o default"
 fi
 
 # ---------------------------------------------------------------------------
@@ -649,6 +694,173 @@ if case_enabled laravel-no-sail; then
   run_ralph "$d" empty-diff --engine claude --max-cycles 1 > /dev/null
   assert_contains "$d/out.log" "comando de teste (detectado): composer test" "sem sail -> composer test"
   assert_not_contains "$d/out.log" "Sail" "nao mencionou Sail"
+fi
+
+# ---------------------------------------------------------------------------
+# 22. Estado observavel publicado: fases E tasks, com os titulos reais
+# ---------------------------------------------------------------------------
+if case_enabled state-published; then
+  header "22. estado publicado em .phases/state/run.tsv"
+  d=$(new_case state-published)
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  s="$d/repo/.phases/state/run.tsv"
+  test -f "$s" && ok "run.tsv criado" || bad "run.tsv criado"
+  assert_contains "$s" "$(printf 'META\tstatus\tfinished')" "status final do run"
+  assert_contains "$s" "$(printf 'META\tengine\tclaude')" "engine no estado"
+  assert_contains "$s" "$(printf 'PHASE\t1\tdone')" "fase 1 concluida"
+  assert_contains "$s" "$(printf 'PHASE\t2\tdone')" "fase 2 concluida"
+  # o titulo da task vem do item `- [ ]`, sem o ruido de markdown
+  assert_contains "$s" "$(printf 'TASK\t1\t1\tdone\tcria o arquivo A')" "task 1 da fase 1 com titulo limpo"
+  assert_contains "$s" "$(printf 'TASK\t1\t2\tdone\tcria o arquivo B')" "task 2 da fase 1"
+  assert_contains "$s" "$(printf 'TASK\t2\t1\tdone\tcria o arquivo C')" "task da fase 2"
+  assert_not_contains "$s" '**Task:**' "markdown removido do titulo"
+fi
+
+# ---------------------------------------------------------------------------
+# 23. Watcher do stream traduz a lista de tarefas do agente (teste de unidade)
+#     E o mecanismo que da progresso por task: sem ele o painel so sabe
+#     "fase em execucao".
+# ---------------------------------------------------------------------------
+if case_enabled stream-watch; then
+  header "23. watcher traduz TaskCreate/TaskUpdate do stream em estado por task"
+  d="$TMP/stream-watch"
+  mkdir -p "$d"
+
+  # Stream com 3 tarefas: a 1a concluida, a 2a em andamento, a 3a intocada.
+  cat > "$d/stream.jsonl" <<'STREAM'
+{"type":"system","subtype":"init","session_id":"x"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TaskCreate","input":{"subject":"alfa"}}]}}
+{"type":"user","tool_use_result":{"task":{"id":"1","subject":"alfa"}}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TaskCreate","input":{"subject":"beta"}}]}}
+{"type":"user","tool_use_result":{"task":{"id":"2","subject":"beta"}}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TaskCreate","input":{"subject":"gama"}}]}}
+{"type":"user","tool_use_result":{"task":{"id":"3","subject":"gama"}}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TaskUpdate","input":{"taskId":"1","status":"in_progress"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TaskUpdate","input":{"taskId":"2","status":"in_progress"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"npm test","description":"rodando a suite"}}]}}
+{"type":"result","subtype":"success","is_error":false}
+STREAM
+
+  (
+    RALPH_LIB_ONLY=1
+    export RALPH_LIB_ONLY
+    # shellcheck disable=SC1090
+    source "$RALPH" 2>/dev/null
+    set +e
+    stream_watch "$d/live.tsv" 7 1 < "$d/stream.jsonl" > /dev/null
+  )
+
+  assert_contains "$d/live.tsv" "$(printf 'PHASE\t7')" "live.tsv aponta a fase corrente"
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t1\tdone')" "task 1 concluida"
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t2\trunning')" "task 2 em execucao"
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t3\tpending')" "task 3 ainda pendente"
+  assert_contains "$d/live.tsv" "rodando a suite" "atividade corrente vem do tool_use"
+fi
+
+# ---------------------------------------------------------------------------
+# 24. Veredito do gate 3 sobrepoe o que a sessao achou que fez: a task que o
+#     verificador reprovou fica INCOMPLETE no estado, nao "concluida".
+# ---------------------------------------------------------------------------
+if case_enabled state-verify-truth; then
+  header "24. gate 3 corrige o status por task no estado"
+  d=$(new_case state-verify-truth)
+  rc=$(run_ralph "$d" verify-incomplete-once --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 1 "$rc" "exit 1 (fase reprovada pelo gate 3)"
+  s="$d/repo/.phases/state/run.tsv"
+  assert_contains "$s" "$(printf 'TASK\t1\t1\tincomplete')" "task reprovada pelo verificador"
+  assert_contains "$s" "$(printf 'TASK\t1\t2\tdone')" "task aprovada pelo verificador"
+  assert_contains "$s" "$(printf 'PHASE\t1\tfailed')" "fase marcada como falha"
+  assert_contains "$s" "$(printf 'META\tstatus\tfailed')" "run marcado como falho"
+fi
+
+# ---------------------------------------------------------------------------
+# 25. ralph-watch.sh --once renderiza o estado de um run real
+# ---------------------------------------------------------------------------
+if case_enabled watch-render; then
+  header "25. ralph-watch.sh --once renderiza o painel"
+  d=$(new_case watch-render)
+  run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" > /dev/null
+  RALPH_WATCH_COLS=110 "$ROOT/scripts/ralph-watch.sh" --once --no-color "$d/repo" > "$d/panel.txt" 2>&1
+  assert_eq 0 "$?" "renderizou sem erro"
+  assert_contains "$d/panel.txt" "RALPH" "cabecalho"
+  assert_contains "$d/panel.txt" "Foundation" "titulo da fase 1"
+  assert_contains "$d/panel.txt" "cria o arquivo A" "titulo da task"
+  assert_contains "$d/panel.txt" "Concluída" "status por linha"
+  assert_contains "$d/panel.txt" "G0" "coluna de gates"
+
+  # sem estado nenhum -> erro claro, nao stack trace
+  mkdir -p "$TMP/empty-repo"
+  "$ROOT/scripts/ralph-watch.sh" --once --no-color "$TMP/empty-repo" > "$d/empty.txt" 2>&1
+  rc=$?
+  assert_eq 1 "$rc" "sai 1 sem estado"
+  assert_contains "$d/empty.txt" "Nenhum estado" "mensagem de estado ausente"
+fi
+
+# ---------------------------------------------------------------------------
+# 26. --dashboard sem o ralph-watch.sh ao lado -> degrada com aviso, nao morre
+#     (o ralph.sh continua sendo copiavel sozinho para outro repo)
+# ---------------------------------------------------------------------------
+if case_enabled dashboard-degrade; then
+  header "26. --dashboard sem ralph-watch.sh -> aviso e segue"
+  d=$(new_case dashboard-degrade)
+  cp "$RALPH" "$d/ralph-solo.sh"
+  rc=$(RALPH="$d/ralph-solo.sh" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh" --dashboard)
+  assert_eq 0 "$rc" "exit 0 (run completo mesmo sem o painel)"
+  assert_contains "$d/out.log" "nao existe" "avisou que o painel nao esta disponivel"
+  assert_contains "$d/out.log" "estado continua publicado" "apontou o caminho alternativo"
+  assert_eq 3 "$(commits "$d")" "fases commitadas normalmente"
+fi
+
+# ---------------------------------------------------------------------------
+# 27. O requisito central: DURANTE a fase, com a sessao ainda aberta, a task 1
+#     aparece concluida, a task 2 em execucao e a FASE em execucao. Sem isto o
+#     progresso so apareceria de uma vez, no fim da fase.
+# ---------------------------------------------------------------------------
+if case_enabled live-progress; then
+  header "27. progresso por task visivel com a fase ainda em execucao"
+  d=$(new_case live-progress)
+
+  (
+    cd "$d/repo" || exit 1
+    env -u RALPH_TEST_CMD -u RALPH_MAX_CYCLES \
+    PATH="$d/bin:$PATH" MOCK_STATE="$d/state" MOCK_SCENARIO=stream-slow \
+    MOCK_TEST_CMD="$d/test.sh" MOCK_SLOW_SECS=6 RALPH_VERIFY=off \
+      bash "$RALPH" --engine claude --test-cmd "$d/test.sh" > "$d/out.log" 2>&1
+  ) &
+  ralph_pid=$!
+
+  # Espera o mock anunciar que esta no meio da fase, entao fotografa o estado.
+  snap=""
+  for _ in $(seq 1 100); do
+    if [ -f "$d/state/slow_midpoint" ]; then
+      sleep 0.5
+      snap=$(cat "$d/repo/.phases/state/live.tsv" 2>/dev/null)
+      break
+    fi
+    sleep 0.2
+  done
+
+  phase_snap=$(grep -E '^PHASE[[:space:]]+1[[:space:]]' "$d/repo/.phases/state/run.tsv" 2>/dev/null || true)
+  panel=$(RALPH_WATCH_COLS=110 "$ROOT/scripts/ralph-watch.sh" --once --no-color "$d/repo" 2>&1 || true)
+
+  wait "$ralph_pid" 2>/dev/null
+  ralph_rc=$?
+
+  printf '%s\n' "$snap" > "$d/snap.tsv"
+  printf '%s\n' "$panel" > "$d/panel-live.txt"
+
+  assert_contains "$d/snap.tsv" "$(printf 'LIVE\t1\tdone')" "no meio da fase: task 1 ja concluida"
+  assert_contains "$d/snap.tsv" "$(printf 'LIVE\t2\trunning')" "no meio da fase: task 2 em execucao"
+  case "$phase_snap" in
+    *running*) ok "no meio da fase: a fase segue em execucao" ;;
+    *)         bad "no meio da fase: a fase segue em execucao (veio '$phase_snap')" ;;
+  esac
+  # o painel renderizado no mesmo instante mostra os tres estados juntos
+  assert_contains "$d/panel-live.txt" "Em execução" "painel mostra algo em execucao"
+  assert_contains "$d/panel-live.txt" "Concluída" "painel mostra a task ja concluida"
+  assert_eq 0 "$ralph_rc" "o run terminou verde depois disso"
 fi
 
 # ---------------------------------------------------------------------------
