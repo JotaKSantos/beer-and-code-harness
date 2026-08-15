@@ -227,7 +227,8 @@ Uma fase é **uma** sessão de agente, então o ralph não teria como saber onde
 
 1. O prompt manda o agente registrar **uma tarefa por item `- [ ]` da fase**, na mesma ordem, e marcá-la em andamento antes de começar e concluída só quando código e testes daquele item passarem.
 2. A sessão roda com `--output-format stream-json`, que emite eventos linha a linha **enquanto** trabalha. O ralph lê as transições da lista de tarefas do agente e as reescreve em `.phases/state/live.tsv`.
-3. No fim da fase, o **gate 3 tem a palavra final**: o veredito `TASK <n>: DONE/INCOMPLETE` do verificador sobrepõe o que a sessão achou que fez. Uma task que o agente marcou como pronta mas que não está no código aparece como `! Incompleta`.
+3. Se o modelo **não usar** a lista de tarefas (acontece — as ferramentas são deferidas e ele pode simplesmente não carregá-las), entra uma reserva observacional: o ralph casa o arquivo que ele escreve com a task que menciona aquele arquivo. É palpite, mas mostra movimento real em vez de deixar a fase inteira "pendente".
+4. No fim da fase, o **gate 3 tem a palavra final**: o veredito `TASK <n>: DONE/INCOMPLETE` do verificador sobrepõe tanto a lista do agente quanto o palpite da reserva. Uma task marcada como pronta que não está no código aparece como `! Incompleta`.
 
 Ou seja: durante a fase o painel mostra a intenção do agente; ao fim da fase mostra a verdade verificada.
 

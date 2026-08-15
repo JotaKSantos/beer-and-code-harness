@@ -188,7 +188,13 @@ fi
 if [ "$name" = "claude" ]; then
   if [ "$outfmt" = "stream-json" ]; then
     n_tasks=$(grep -cE '^[[:space:]]*- \[[ x]\]' <<< "$prompt")
-    if [ "$scenario" = "stream-slow" ]; then
+    if [ "$scenario" = "tool-error" ]; then
+      # Uma ferramenta falhou no meio da sessao (grep sem match, teste
+      # vermelho, arquivo inexistente): o tool_result vem com is_error=true.
+      # E trabalho normal do agente — o engine terminou bem.
+      emit_stream_tasks "$n_tasks" "$n_tasks"
+      echo '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"grep: sail: No such file","is_error":true,"tool_use_id":"toolu_x"}]}}'
+    elif [ "$scenario" = "stream-slow" ]; then
       # Para o exterior a sessao e uma caixa preta que demora: emite a 1a task
       # concluida e a 2a em andamento, SEGURA, e so entao termina. E a janela em
       # que o teste observa o painel a meio caminho.
@@ -339,6 +345,24 @@ run_ralph() {
     RALPH_LIMIT_BUFFER=1 \
     RALPH_VERIFY="${CASE_VERIFY:-}" \
     RALPH_VERIFY_MODEL="${CASE_VERIFY_MODEL:-}" \
+      bash "$RALPH" "$@" > "$dir/out.log" 2>&1
+  ) || rc=$?
+  echo "$rc"
+}
+
+# Igual ao run_ralph, mas PRESERVA RALPH_TEST_CMD do chamador — para exercitar
+# de proposito o caso em que a variavel do ambiente vence a deteccao.
+run_ralph_env() {
+  local dir="$1" scenario="$2"; shift 2
+  local rc=0
+  (
+    cd "$dir/repo" || exit 1
+    PATH="$dir/bin:$PATH" \
+    MOCK_STATE="$dir/state" \
+    MOCK_SCENARIO="$scenario" \
+    MOCK_TEST_CMD="$dir/test.sh" \
+    RALPH_LIMIT_WAIT_DEFAULT=1 \
+    RALPH_LIMIT_BUFFER=1 \
       bash "$RALPH" "$@" > "$dir/out.log" 2>&1
   ) || rc=$?
   echo "$rc"
@@ -861,6 +885,103 @@ if case_enabled live-progress; then
   assert_contains "$d/panel-live.txt" "Em execução" "painel mostra algo em execucao"
   assert_contains "$d/panel-live.txt" "Concluída" "painel mostra a task ja concluida"
   assert_eq 0 "$ralph_rc" "o run terminou verde depois disso"
+fi
+
+# ---------------------------------------------------------------------------
+# 28. REGRESSAO: ferramenta que falha DENTRO da sessao nao pode reprovar o
+#     gate 0. Com stream-json o log carrega a conversa inteira, e um
+#     tool_result de comando que retornou != 0 traz "is_error":true — varrer o
+#     log todo reprovava a fase por causa de um grep sem match.
+# ---------------------------------------------------------------------------
+if case_enabled gate0-tool-error; then
+  header "28. tool_result com is_error nao reprova o gate 0"
+  d=$(new_case gate0-tool-error)
+  rc=$(run_ralph "$d" tool-error --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 0 "$rc" "exit 0 (o engine terminou bem)"
+  assert_not_contains "$d/out.log" "Gate 0 vermelho" "gate 0 nao reprovou"
+  assert_eq 3 "$(commits "$d")" "fases commitadas"
+  # o log realmente continha o is_error da ferramenta
+  assert_contains "$d/repo/.phases/logs/phase-01.cycle-1.log" '"is_error":true' "o tool_result com erro estava no log"
+fi
+
+# ---------------------------------------------------------------------------
+# 29. Comando de teste inexistente -> abort no preflight, zero tokens.
+#     Caso real: RALPH_TEST_CMD com sail exportado no shell do dev vence a
+#     deteccao em QUALQUER projeto; sem este check, todo gate 2 falhava e
+#     queimava os 3 ciclos de cada fase.
+# ---------------------------------------------------------------------------
+if case_enabled test-cmd-missing; then
+  header "29. comando de teste inexistente -> abort no preflight"
+  d=$(new_case test-cmd-missing)
+  rc=$(RALPH_TEST_CMD="vendor/bin/sail composer test:parallel" \
+       run_ralph_env "$d" ok --engine claude)
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "nao executavel" "abortou com a causa"
+  assert_contains "$d/out.log" "RALPH_TEST_CMD" "identificou a origem do comando"
+  assert_contains "$d/out.log" "env -u RALPH_TEST_CMD" "deu a saida"
+  assert_eq 1 "$(commits "$d")" "nenhum commit de fase"
+  test -f "$d/state/impl_calls" && bad "nenhuma sessao de engine iniciada" || ok "nenhuma sessao de engine iniciada"
+fi
+
+# ---------------------------------------------------------------------------
+# 30. Modelo que NAO usa a lista de tarefas: o painel ainda mostra progresso,
+#     inferido dos arquivos que o agente escreve. Sem a reserva, uma fase
+#     inteira ficava com todas as tasks "pendentes".
+# ---------------------------------------------------------------------------
+if case_enabled task-fallback; then
+  header "30. progresso inferido quando o agente nao usa a lista de tarefas"
+  d="$TMP/task-fallback"
+  mkdir -p "$d/.phases"
+
+  cat > "$d/.phases/phase-07.md" <<'PH'
+## Phase 7: Exemplo
+
+- [ ] **Task:** criar `src/Money.php` com a classe Money
+- [ ] **Task:** criar `tests/MoneyTest.php` cobrindo Money
+- [ ] **Task:** atualizar o README
+PH
+
+  # Stream sem NENHUM TaskCreate/TaskUpdate — so escrita de arquivos.
+  cat > "$d/stream.jsonl" <<'STREAM'
+{"type":"system","subtype":"init","session_id":"x"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/repo/src/Money.php","content":"..."}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/repo/tests/MoneyTest.php","content":"..."}}]}}
+{"type":"result","subtype":"success","is_error":false}
+STREAM
+
+  (
+    RALPH_LIB_ONLY=1
+    export RALPH_LIB_ONLY
+    # shellcheck disable=SC1090
+    source "$RALPH" 2>/dev/null
+    set +e
+    PHASES_DIR="$d/.phases"
+    stream_watch "$d/live.tsv" 7 1 phase-07.md < "$d/stream.jsonl" > /dev/null
+  )
+
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t1\tdone')" "task 1 dada por concluida ao passar para a seguinte"
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t2\trunning')" "task 2 em execucao (arquivo sendo escrito)"
+  assert_not_contains "$d/live.tsv" "$(printf 'LIVE\t3\t')" "task 3 intocada continua fora do estado"
+
+  # E quando o agente USA a lista, ela manda: a inferencia e descartada.
+  cat > "$d/stream2.jsonl" <<'STREAM'
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/repo/src/Money.php","content":"..."}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TaskCreate","input":{"subject":"criar Money"}}]}}
+{"type":"user","tool_use_result":{"task":{"id":"1","subject":"criar Money"}}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TaskUpdate","input":{"taskId":"1","status":"in_progress"}}]}}
+{"type":"result","subtype":"success","is_error":false}
+STREAM
+
+  (
+    RALPH_LIB_ONLY=1
+    export RALPH_LIB_ONLY
+    # shellcheck disable=SC1090
+    source "$RALPH" 2>/dev/null
+    set +e
+    PHASES_DIR="$d/.phases"
+    stream_watch "$d/live2.tsv" 7 1 phase-07.md < "$d/stream2.jsonl" > /dev/null
+  )
+  assert_contains "$d/live2.tsv" "$(printf 'LIVE\t1\trunning')" "a lista do agente sobrepoe a inferencia"
 fi
 
 # ---------------------------------------------------------------------------

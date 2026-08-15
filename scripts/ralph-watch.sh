@@ -246,12 +246,28 @@ gates_cell() {
 W=100
 
 # RALPH_WATCH_COLS fixa a largura (teste, pipe, terminal que nao reporta).
+#
+# `tput cols` sozinho nao basta: com --embedded o painel roda em background
+# (`&`) a partir do ralph, e ali o tput pode nao enxergar o terminal — o painel
+# caia para a largura minima e truncava os titulos num terminal largo.
+# /dev/tty responde mesmo em background, entao serve de segunda fonte.
 calc_width() {
   local cols="${RALPH_WATCH_COLS:-}"
-  [ -n "$cols" ] || cols=$(tput cols 2>/dev/null || echo 100)
-  [ -z "$cols" ] && cols=100
+
+  [ -n "$cols" ] || cols=$(tput cols 2>/dev/null || true)
+
+  if ! [[ "$cols" =~ ^[0-9]+$ ]] || [ "$cols" -lt 40 ]; then
+    cols=$(stty size < /dev/tty 2>/dev/null | cut -d' ' -f2 || true)
+  fi
+  if ! [[ "$cols" =~ ^[0-9]+$ ]] || [ "$cols" -lt 40 ]; then
+    cols="${COLUMNS:-}"
+  fi
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=100
+
   W=$cols
-  [ "$W" -gt 110 ] && W=110
+  # Teto alto: a tabela ganha em legibilidade com a largura toda, e o titulo da
+  # task e a primeira coisa a ser cortada quando falta espaco.
+  [ "$W" -gt 200 ] && W=200
   [ "$W" -lt 64 ] && W=64
 }
 

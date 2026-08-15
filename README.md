@@ -230,7 +230,8 @@ A phase is **one** agent session, so ralph could not know where the session is â
 
 1. The prompt tells the agent to register **one task per `- [ ]` item of the phase**, in the same order, marking it in progress before starting and completed only when that item's code and tests pass.
 2. The session runs with `--output-format stream-json`, which emits events line by line **while** it works. ralph reads the agent's task-list transitions and rewrites them into `.phases/state/live.tsv`.
-3. At the end of the phase, **gate 3 has the last word**: the verifier's `TASK <n>: DONE/INCOMPLETE` verdict overrides what the session believed it did. A task the agent marked done but that is not in the code shows up as `! Incompleta`.
+3. If the model **doesn't use** the task list (it happens â€” the tools are deferred and it may simply not load them), an observational fallback kicks in: ralph matches the file being written to the task that mentions that file. It's a guess, but it shows real movement instead of leaving the whole phase "pending".
+4. At the end of the phase, **gate 3 has the last word**: the verifier's `TASK <n>: DONE/INCOMPLETE` verdict overrides both the agent's list and the fallback's guess. A task marked done but not in the code shows up as `! Incompleta`.
 
 So: during the phase the panel shows the agent's intent; at the end of the phase it shows the verified truth.
 

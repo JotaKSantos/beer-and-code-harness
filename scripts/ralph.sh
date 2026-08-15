@@ -159,6 +159,9 @@ LIMIT_BUFFER="${RALPH_LIMIT_BUFFER:-60}"
 TEST_CMD=""
 SAIL_BIN=""
 LIMIT_WAITS=0
+# Arquivo da fase corrente: o watcher do stream usa os titulos das tasks para
+# casar um arquivo escrito com a task que o menciona.
+CURRENT_PHASE_FILE=""
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -301,6 +304,41 @@ check_sail_running() {
   log "Sail: containers de pe"
 }
 
+# O gate 2 roda este comando uma vez por ciclo, em toda fase. Se o executavel
+# nao existe, TODA fase reprova por um motivo que nao tem nada a ver com o
+# codigo, queimando os 3 ciclos de correcao de cada uma — o mesmo estrago que o
+# check de containers do Sail evita. Melhor abortar antes da primeira sessao.
+#
+# O caso real: RALPH_TEST_CMD="vendor/bin/sail ..." exportado no shell do dev
+# vence a deteccao por manifest em QUALQUER projeto que ele rode, inclusive um
+# sem Sail nenhum. A mensagem precisa dizer de onde o comando veio.
+check_test_cmd_runnable() {
+  local origin="$1"
+  local first="${TEST_CMD%% *}"
+
+  if [[ "$first" == */* ]]; then
+    [ -x "$first" ] && return 0
+  else
+    command -v "$first" > /dev/null 2>&1 && return 0
+  fi
+
+  fail "Comando de teste do gate 2 nao executavel: '$first'"
+  fail "Comando completo ($origin): $TEST_CMD"
+  case "$origin" in
+    RALPH_TEST_CMD)
+      fail "Essa variavel esta exportada no seu ambiente e vence a deteccao por"
+      fail "manifest em qualquer projeto. Para este run, sobreponha com:"
+      fail "    --test-cmd '<comando deste projeto>'"
+      fail "ou limpe a variavel:  env -u RALPH_TEST_CMD $0 ..."
+      ;;
+    *)
+      fail "Passe --test-cmd '<comando>' com o runner correto deste projeto."
+      ;;
+  esac
+  fail "Abortando antes da primeira sessao: todo gate 2 falharia e queimaria os ciclos de correcao."
+  exit 1
+}
+
 resolve_test_cmd() {
   SAIL_BIN="$(detect_sail || true)"
 
@@ -308,6 +346,7 @@ resolve_test_cmd() {
     TEST_CMD="$TEST_CMD_FLAG"
     log "Gate 2 — comando de teste (--test-cmd): $TEST_CMD"
     check_sail_running
+    check_test_cmd_runnable "--test-cmd"
     return 0
   fi
 
@@ -315,6 +354,7 @@ resolve_test_cmd() {
     TEST_CMD="$RALPH_TEST_CMD"
     log "Gate 2 — comando de teste (RALPH_TEST_CMD): $TEST_CMD"
     check_sail_running
+    check_test_cmd_runnable "RALPH_TEST_CMD"
     return 0
   fi
 
@@ -339,6 +379,7 @@ resolve_test_cmd() {
   if [ -n "$TEST_CMD" ]; then
     log "Gate 2 — comando de teste (detectado): $TEST_CMD"
     check_sail_running
+    check_test_cmd_runnable "detectado"
   else
     warn "Gate 2 DESABILITADO: nenhum comando de teste resolvido."
     if [ "$VERIFY_MODE" = "off" ]; then
@@ -728,12 +769,52 @@ agent_status_to_ralph() {
   esac
 }
 
-# stream_watch <live_file> <phase_num> <quiet>
+# stream_watch <live_file> <phase_num> <quiet> [phase_file]
+#
+# Fonte primaria: a lista de tarefas do agente. Fonte de reserva: os arquivos
+# que ele escreve — nem todo modelo usa a lista, e sem reserva o painel ficaria
+# com tudo "pendente" durante uma fase inteira que esta claramente andando.
 stream_watch() {
-  local live="$1" phase_num="$2" quiet="$3"
+  local live="$1" phase_num="$2" quiet="$3" phase_file="${4:-}"
   local -A st=() idx_of=()
-  local -a pending_create=()
+  local -a pending_create=() task_titles=()
   local next=0 activity="" line tool val tid status idx
+  local agent_list_used=0 inferred_max=0
+
+  # Titulos das tasks, para casar caminho de arquivo -> task.
+  if [ -n "$phase_file" ]; then
+    while IFS= read -r val; do task_titles+=("$val"); done < <(phase_task_titles "$phase_file")
+  fi
+
+  # Qual task menciona este arquivo? Casa pelo caminho citado no enunciado
+  # (`src/Money.php`) e, se nao achar, pelo nome do arquivo.
+  sw_task_for_file() {
+    local path="$1" base i t
+    base=$(basename -- "$path")
+    for i in "${!task_titles[@]}"; do
+      t="${task_titles[$i]}"
+      if [[ "$t" == *"$path"* ]] || [[ "$t" == *"$base"* ]]; then
+        printf '%s' $((i + 1))
+        return 0
+      fi
+    done
+    return 1
+  }
+
+  # Reserva: o agente escreveu o arquivo da task N. Marca N em andamento e da
+  # por concluidas as anteriores que ele ja tocou — ele trabalha em ordem, e o
+  # gate 3 corrige o palpite no fim da fase de qualquer jeito.
+  sw_infer_from_file() {
+    local path="$1" n i
+    [ "$agent_list_used" -eq 1 ] && return 0
+    n=$(sw_task_for_file "$path") || return 0
+    for ((i = 1; i < n; i++)); do
+      [ "${st[$i]:-}" = "running" ] && st["$i"]="done"
+    done
+    [ "${st[$n]:-}" = "done" ] || st["$n"]="running"
+    [ "$n" -gt "$inferred_max" ] && inferred_max="$n"
+    return 0
+  }
 
   sw_flush() {
     local tmp="$live.$$" k
@@ -756,6 +837,11 @@ stream_watch() {
         val=$(json_str "$line" subject) || val=""
         pending_create+=("$val")
         activity="planejando: $val"
+        # A lista do agente assumiu: descarta o que a reserva tinha inferido.
+        if [ "$agent_list_used" -eq 0 ]; then
+          agent_list_used=1
+          st=()
+        fi
         sw_flush
         ;;
       *'"task":{"id":"'*)
@@ -782,6 +868,7 @@ stream_watch() {
       # --- lista de tarefas: TodoWrite (CLI anterior) -----------------------
       *'"name":"TodoWrite"'*)
         local rest="$line" chunk i2=0
+        agent_list_used=1
         st=()
         while [[ "$rest" == *'"status":"'* ]]; do
           chunk="${rest#*'"status":"'}"
@@ -804,6 +891,7 @@ stream_watch() {
           Edit|Write|NotebookEdit)
             val=$(json_str "$line" file_path) || val=""
             activity="$tool: $(basename -- "${val:-?}")"
+            [ -n "$val" ] && sw_infer_from_file "$val"
             ;;
           Read|Glob|Grep)
             activity="lendo o projeto ($tool)"
@@ -863,20 +951,27 @@ task_protocol_block() {
   [[ "$ENGINE" == "claude" ]] || return 0
   cat <<'PROTO'
 
-## Protocolo de progresso (obrigatorio)
-Antes de escrever qualquer codigo, registre na sua ferramenta de lista de
-tarefas UMA tarefa para CADA item `- [ ]` desta fase, na MESMA ORDEM e com o
-mesmo texto do item. Nao agrupe dois itens numa tarefa, nao reordene, nao crie
-tarefas extras de apoio.
+## Protocolo de progresso (obrigatorio, faca isto PRIMEIRO)
+As ferramentas de lista de tarefas podem estar em modo deferido nesta sessao —
+nesse caso elas NAO aparecem na sua lista de ferramentas ate serem carregadas.
+Antes de qualquer outra coisa:
+
+1. Carregue-as com ToolSearch: `select:TaskCreate,TaskUpdate`
+   (se este CLI usar TodoWrite em vez disso, carregue `select:TodoWrite`).
+2. Crie UMA tarefa para CADA item `- [ ]` desta fase, na MESMA ORDEM e com o
+   mesmo texto do item. Nao agrupe dois itens numa tarefa, nao reordene, nao
+   crie tarefas extras de apoio.
 
 Enquanto trabalha:
-- marque a tarefa como em andamento ANTES de comecar a implementa-la;
-- marque como concluida so quando o codigo E os testes daquele item estiverem
-  prontos e passando;
+- marque a tarefa como em andamento (`in_progress`) ANTES de comecar a
+  implementa-la;
+- marque como concluida (`completed`) so quando o codigo E os testes daquele
+  item estiverem prontos e passando;
 - trabalhe em uma tarefa por vez, na ordem.
 
-O orquestrador acompanha essas transicoes em tempo real: uma tarefa que voce
-nao marcar aparece como pendente no painel, mesmo que o codigo exista.
+Isto nao e burocracia: um orquestrador externo acompanha essas transicoes em
+tempo real para mostrar o progresso da fase. Sem elas o operador humano fica
+sem nenhuma visibilidade do que voce esta fazendo enquanto a sessao roda.
 PROTO
 }
 
@@ -1147,7 +1242,7 @@ run_engine() {
              -p "$(cat "$prompt_file")" \
              --output-format stream-json --verbose < /dev/null 2>&1 \
              | tee "$log_file" \
-             | stream_watch "$LIVE_STATE" "${RALPH_PHASE_NUM:-0}" "$quiet"; then
+             | stream_watch "$LIVE_STATE" "${RALPH_PHASE_NUM:-0}" "$quiet" "$CURRENT_PHASE_FILE"; then
           rc=0
         else
           rc=$?
@@ -1177,12 +1272,22 @@ gate0_engine_finished() {
   local log_file="$1" rc="$2"
 
   if [[ "$ENGINE" == "claude" ]]; then
-    if ! grep -qF '"type":"result"' "$log_file" && ! grep -qF '"type": "result"' "$log_file"; then
+    # is_error tem que sair do EVENTO DE RESULTADO, nunca do log inteiro.
+    # Com --output-format stream-json o log carrega toda a conversa, e um
+    # tool_result de ferramenta que falhou (um grep sem match, um teste
+    # vermelho, um ls de arquivo inexistente) tambem traz "is_error":true.
+    # Isso e trabalho normal do agente, nao falha do engine: varrer o arquivo
+    # todo reprovava a fase inteira por causa de um comando que retornou 1.
+    local result_line
+    result_line=$(grep -F '"type":"result"' "$log_file" | tail -n 1)
+    [ -z "$result_line" ] && result_line=$(grep -F '"type": "result"' "$log_file" | tail -n 1)
+
+    if [ -z "$result_line" ]; then
       GATE_CAUSE="O engine terminou sem emitir um resultado. Ultimas linhas do output:"$'\n'"$(tail -n 40 "$log_file")"
       return 1
     fi
-    if grep -qE '"is_error"[[:space:]]*:[[:space:]]*true' "$log_file"; then
-      GATE_CAUSE="O engine reportou is_error=true. Ultimas linhas do output:"$'\n'"$(tail -n 40 "$log_file")"
+    if grep -qE '"is_error"[[:space:]]*:[[:space:]]*true' <<< "$result_line"; then
+      GATE_CAUSE="O engine reportou is_error=true no resultado. Ultimas linhas do output:"$'\n'"$(tail -n 40 "$log_file")"
       return 1
     fi
   fi
@@ -1346,6 +1451,7 @@ run_phase() {
   export RALPH_PHASE_TITLE="$phase_title"
   export RALPH_PHASE_NUM="$phase_num"
   export RALPH_PHASE_TOTAL="$total"
+  CURRENT_PHASE_FILE="$phase_file"
 
   LIMIT_WAITS=0
   GATE_CAUSE=""
