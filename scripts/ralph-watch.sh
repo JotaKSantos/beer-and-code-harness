@@ -19,6 +19,21 @@
 #                       (quem chamou ja trocou) e sai quando o run termina
 #   --no-color          desliga ANSI
 #
+# Layout: o topo (identificacao, barras, trabalho atual) e fixo; a tabela de
+# fases e tasks rola dentro de uma janela que cabe na altura do terminal. Sem
+# isso, num plano com dezenas de tasks o cabecalho subia para fora da tela
+# alternativa — onde o scroll do terminal nao alcanca.
+#
+# Teclas (quando ha /dev/tty, inclusive rodando embutido no ralph):
+#   ↑/↓ ou k/j     rola uma linha        PgUp/PgDn ou b/espaco  rola uma pagina
+#   Home/g         primeira linha        End/G                  ultima linha
+#   f              volta a seguir a fase corrente (modo automatico)
+#   q              sai do painel (nao interrompe o ralph)
+#
+# Variaveis de ambiente:
+#   RALPH_WATCH_COLS   fixa a largura (teste, pipe, terminal que nao reporta)
+#   RALPH_WATCH_LINES  fixa a altura; com --once tambem liga a janela rolante
+#
 # Contrato de estado (escrito pelo ralph, TSV, um escritor por arquivo):
 #
 #   .phases/state/run.tsv      escritor: processo principal do ralph
@@ -55,7 +70,7 @@ while [[ $# -gt 0 ]]; do
     --interval)   INTERVAL="$2"; shift 2 ;;
     --interval=*) INTERVAL="${1#*=}"; shift ;;
     --no-color)   USE_COLOR=false; shift ;;
-    -h|--help)    sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help)    sed -n '2,56p' "$0"; exit 0 ;;
     *)            REPO="$1"; shift ;;
   esac
 done
@@ -244,6 +259,19 @@ gates_cell() {
 # ---------------------------------------------------------------------------
 
 W=100
+H=24
+
+# Estado da janela rolante da tabela. FOLLOW=true deixa o painel escolher o
+# recorte sozinho (segue a fase corrente); qualquer tecla de rolagem passa o
+# controle para o usuario ate ele apertar `f`.
+OFF=0
+FOLLOW=true
+QUIT=false
+VIS=0
+TOTAL=0
+MAX_OFF=0
+FOOTER=0
+HEAD=""
 
 # RALPH_WATCH_COLS fixa a largura (teste, pipe, terminal que nao reporta).
 #
@@ -259,7 +287,7 @@ calc_width() {
   # tamanho — e 80 e um numero plausivel, entao passava batido e o painel
   # ficava com metade da largura num terminal largo.
   if ! [[ "$cols" =~ ^[0-9]+$ ]]; then
-    cols=$(stty size < /dev/tty 2>/dev/null | cut -d' ' -f2 || true)
+    cols=$(stty size 2>/dev/null < /dev/tty | cut -d' ' -f2 || true)
   fi
   if ! [[ "$cols" =~ ^[0-9]+$ ]] || [ "$cols" -lt 40 ]; then
     cols=$(tput cols 2>/dev/null || true)
@@ -273,6 +301,27 @@ calc_width() {
   # frame, entao redimensionar a janela reflete no desenho seguinte.
   W=$cols
   [ "$W" -lt 64 ] && W=64
+}
+
+# Mesma escada do calc_width, pelas mesmas razoes: stty le o tamanho real por
+# ioctl e responde mesmo com o painel em background; tput cai para o 24 do
+# terminfo quando nao sabe.
+calc_height() {
+  local lines="${RALPH_WATCH_LINES:-}"
+
+  if ! [[ "$lines" =~ ^[0-9]+$ ]]; then
+    lines=$(stty size 2>/dev/null < /dev/tty | cut -d' ' -f1 || true)
+  fi
+  if ! [[ "$lines" =~ ^[0-9]+$ ]] || [ "$lines" -lt 10 ]; then
+    lines=$(tput lines 2>/dev/null || true)
+  fi
+  if ! [[ "$lines" =~ ^[0-9]+$ ]] || [ "$lines" -lt 10 ]; then
+    lines="${LINES:-}"
+  fi
+  [[ "$lines" =~ ^[0-9]+$ ]] || lines=24
+
+  H=$lines
+  [ "$H" -lt 12 ] && H=12
 }
 
 box_top() {
@@ -401,34 +450,22 @@ draw_panels() {
   printf '%s %s\n' "$bot_l" "$bot_r"
 }
 
-draw_table() {
+# Linhas da tabela montadas uma vez por frame, antes de saber o recorte: quem
+# rola escolhe o intervalo, nao remonta o conteudo.
+declare -a ROWS ROW_HL
+declare -A PHASE_ROW PHASE_END
+RUN_ROW=-1
+
+build_rows() {
+  ROWS=(); ROW_HL=(); PHASE_ROW=(); PHASE_END=(); RUN_ROW=-1
+
   # c_gates=19 cabe "G0 ✓ G1 ✓ G2 ✓ G3 ✓" inteiro; c_status=14 cabe o rotulo
   # mais longo ("▶ Em execução"). Encolher qualquer um deles corta a informacao.
-  local c_id=4 c_status=14 c_try=9 c_gates=19
-  local c_name=$(( W - c_id - c_status - c_try - c_gates - 16 ))
-  [ "$c_name" -lt 16 ] && c_name=16
-
-  local sep_t sep_m sep_b
-  sep_t=$(printf '%s┌%s┬%s┬%s┬%s┬%s┐%s' "$C_CYAN" \
-    "$(repeat '─' $((c_id+2)))" "$(repeat '─' $((c_name+2)))" "$(repeat '─' $((c_status+2)))" \
-    "$(repeat '─' $((c_try+2)))" "$(repeat '─' $((c_gates+2)))" "$C_RESET")
-  sep_m=$(printf '%s├%s┼%s┼%s┼%s┼%s┤%s' "$C_CYAN" \
-    "$(repeat '─' $((c_id+2)))" "$(repeat '─' $((c_name+2)))" "$(repeat '─' $((c_status+2)))" \
-    "$(repeat '─' $((c_try+2)))" "$(repeat '─' $((c_gates+2)))" "$C_RESET")
-  sep_b=$(printf '%s└%s┴%s┴%s┴%s┴%s┘%s' "$C_CYAN" \
-    "$(repeat '─' $((c_id+2)))" "$(repeat '─' $((c_name+2)))" "$(repeat '─' $((c_status+2)))" \
-    "$(repeat '─' $((c_try+2)))" "$(repeat '─' $((c_gates+2)))" "$C_RESET")
+  COL_ID=4; COL_STATUS=14; COL_TRY=9; COL_GATES=19
+  COL_NAME=$(( W - COL_ID - COL_STATUS - COL_TRY - COL_GATES - 16 ))
+  [ "$COL_NAME" -lt 16 ] && COL_NAME=16
 
   local V="${C_CYAN}│${C_RESET}"
-
-  printf '%s\n' "$sep_t"
-  printf '%s %s %s %s %s %s %s %s %s %s %s\n' "$V" \
-    "${C_CYAN}$(pad 'ID' $c_id)${C_RESET}" "$V" \
-    "${C_CYAN}$(pad 'Fase / Task' $c_name)${C_RESET}" "$V" \
-    "${C_CYAN}$(pad 'Status' $c_status)${C_RESET}" "$V" \
-    "${C_CYAN}$(pad 'Tentativa' $c_try)${C_RESET}" "$V" \
-    "${C_CYAN}$(pad 'Gates' $c_gates)${C_RESET}" "$V"
-  printf '%s\n' "$sep_m"
 
   # Celula colorida com padding correto: mede o texto SEM ANSI (plain) e
   # completa a diferenca. Colorir depois de padear inflaria a largura visivel.
@@ -438,44 +475,181 @@ draw_table() {
     printf '%s%*s' "$colored" $(( w - n )) ''
   }
 
-  local num i st tries hl row
+  local num i st tries row
   for num in "${PHASE_NUMS[@]}"; do
     st="${PH_STATUS[$num]}"
     tries="${PH_ATTEMPT[$num]}"
     [ "$tries" = "0" ] && tries="–"
-    hl=""
-    [ "$st" = "running" ] && hl="$C_HILITE"
 
-    row=$(printf '%s %s %s %s %s %s %s %s %s %s %s' "$V" \
-      "$(pad "F$num" $c_id)" "$V" \
-      "$(cell "${C_WHITE}$(pad "${PH_TITLE[$num]}" $c_name)${C_RESET}" "$(pad "${PH_TITLE[$num]}" $c_name)" $c_name)" "$V" \
-      "$(cell "$(status_label "$st")" "$(status_plain "$st")" $c_status)" "$V" \
-      "$(pad "$tries" $c_try)" "$V" \
-      "$(cell "$(gates_cell "${PH_GATES[$num]}" 1)" "$(gates_cell "${PH_GATES[$num]}" 0)" $c_gates)" "$V")
-    printf '%s%s%s\n' "$hl" "$row" "$C_RESET"
+    PHASE_ROW[$num]=${#ROWS[@]}
+    # a linha guarda tudo menos a borda direita: ali vai a barra de rolagem
+    row=$(printf '%s %s %s %s %s %s %s %s %s %s' "$V" \
+      "$(pad "F$num" $COL_ID)" "$V" \
+      "$(cell "${C_WHITE}$(pad "${PH_TITLE[$num]}" $COL_NAME)${C_RESET}" "$(pad "${PH_TITLE[$num]}" $COL_NAME)" $COL_NAME)" "$V" \
+      "$(cell "$(status_label "$st")" "$(status_plain "$st")" $COL_STATUS)" "$V" \
+      "$(pad "$tries" $COL_TRY)" "$V" \
+      "$(cell "$(gates_cell "${PH_GATES[$num]}" 1)" "$(gates_cell "${PH_GATES[$num]}" 0)" $COL_GATES)")
+    ROWS+=("$row")
+    if [ "$st" = "running" ]; then
+      ROW_HL+=("$C_HILITE")
+      [ "$RUN_ROW" -lt 0 ] && RUN_ROW=$(( ${#ROWS[@]} - 1 ))
+    else
+      ROW_HL+=("")
+    fi
 
-    local tst thl ttitle
+    local tst ttitle
     for ((i=1; i<=${TK_COUNT[$num]:-0}; i++)); do
       tst="${TK_STATUS[$num:$i]:-pending}"
-      thl=""
-      [ "$tst" = "running" ] && thl="$C_HILITE"
-      ttitle=$(pad "  ↳ ${TK_TITLE[$num:$i]}" $c_name)
-      row=$(printf '%s %s %s %s %s %s %s %s %s %s %s' "$V" \
-        "$(cell "${C_GREY}$(pad "T$i" $c_id)${C_RESET}" "$(pad "T$i" $c_id)" $c_id)" "$V" \
+      ttitle=$(pad "  ↳ ${TK_TITLE[$num:$i]}" $COL_NAME)
+      row=$(printf '%s %s %s %s %s %s %s %s %s %s' "$V" \
+        "$(cell "${C_GREY}$(pad "T$i" $COL_ID)${C_RESET}" "$(pad "T$i" $COL_ID)" $COL_ID)" "$V" \
         "$ttitle" "$V" \
-        "$(cell "$(status_label "$tst")" "$(status_plain "$tst")" $c_status)" "$V" \
-        "$(cell "${C_GREY}$(pad '–' $c_try)${C_RESET}" "$(pad '–' $c_try)" $c_try)" "$V" \
-        "$(cell "${C_GREY}$(pad '–' $c_gates)${C_RESET}" "$(pad '–' $c_gates)" $c_gates)" "$V")
-      printf '%s%s%s\n' "$thl" "$row" "$C_RESET"
+        "$(cell "$(status_label "$tst")" "$(status_plain "$tst")" $COL_STATUS)" "$V" \
+        "$(cell "${C_GREY}$(pad '–' $COL_TRY)${C_RESET}" "$(pad '–' $COL_TRY)" $COL_TRY)" "$V" \
+        "$(cell "${C_GREY}$(pad '–' $COL_GATES)${C_RESET}" "$(pad '–' $COL_GATES)" $COL_GATES)")
+      ROWS+=("$row")
+      if [ "$tst" = "running" ]; then
+        ROW_HL+=("$C_HILITE")
+        # a task em execucao e a ancora preferida: e o que o usuario quer ver
+        RUN_ROW=$(( ${#ROWS[@]} - 1 ))
+      else
+        ROW_HL+=("")
+      fi
     done
+    PHASE_END[$num]=$(( ${#ROWS[@]} - 1 ))
   done
-  printf '%s\n' "$sep_b"
 }
 
-draw() {
+clamp_off() {
+  [ "$OFF" -gt "$MAX_OFF" ] && OFF=$MAX_OFF
+  [ "$OFF" -lt 0 ] && OFF=0
+}
+
+# Recorte automatico: mostra o bloco da fase corrente inteiro quando ele cabe;
+# quando nao cabe, centra a task em execucao.
+follow_offset() {
+  local cur="${META[phase_cur]:-}"
+  if [ -z "$cur" ] || [ -z "${PHASE_ROW[$cur]:-}" ]; then
+    # sem fase corrente (run terminado, por exemplo): mantem o comeco a vista
+    OFF=0
+    [ "${META[status]:-running}" = "failed" ] && [ "$RUN_ROW" -ge 0 ] \
+      && OFF=$(( RUN_ROW - VIS / 2 ))
+    clamp_off
+    return
+  fi
+  local s="${PHASE_ROW[$cur]}" e="${PHASE_END[$cur]}"
+  if [ $(( e - s + 1 )) -le "$VIS" ]; then
+    OFF=$(( s - 1 ))   # uma linha de contexto acima da fase
+  elif [ "$RUN_ROW" -ge "$s" ] && [ "$RUN_ROW" -le "$e" ]; then
+    OFF=$(( RUN_ROW - VIS / 2 ))
+  else
+    OFF=$s
+  fi
+  clamp_off
+}
+
+# Define HEAD, VIS, TOTAL, MAX_OFF, FOOTER e OFF para o frame. Roda no shell
+# principal (nao em subshell) porque as teclas precisam do VIS e do MAX_OFF
+# calculados aqui para paginar.
+build_frame() {
   calc_width
-  draw_header
-  draw_panels
+  calc_height
+  build_rows
+
+  HEAD=$(draw_header; draw_panels)
+  TOTAL=${#ROWS[@]}
+
+  local head_n note_n=0 avail
+  head_n=$(printf '%s\n' "$HEAD" | wc -l)
+  [ -n "${META[note]:-}" ] && note_n=2
+
+  # 4 = topo, cabecalho de coluna, separador e rodape da tabela.
+  # 1 = folga da ultima linha, que o terminal usaria para rolar o frame.
+  avail=$(( H - head_n - 4 - note_n - 1 ))
+  [ "$avail" -lt 3 ] && avail=3
+
+  # --once e um dump: so recorta se a altura foi fixada de proposito.
+  if { $ONCE && [ -z "${RALPH_WATCH_LINES:-}" ]; } || [ "$TOTAL" -le "$avail" ]; then
+    VIS=$TOTAL; MAX_OFF=0; FOOTER=0; OFF=0
+    return
+  fi
+
+  FOOTER=1
+  VIS=$(( avail - 1 ))
+  [ "$VIS" -lt 3 ] && VIS=3
+  [ "$VIS" -gt "$TOTAL" ] && VIS=$TOTAL
+  MAX_OFF=$(( TOTAL - VIS ))
+  if $FOLLOW; then follow_offset; else clamp_off; fi
+}
+
+# Borda direita da linha visivel i: vira barra de rolagem quando ha corte.
+scroll_edge() {
+  local i="$1"
+  if [ "$FOOTER" -eq 0 ]; then
+    printf '%s│%s' "$C_CYAN" "$C_RESET"
+    return
+  fi
+  local th top rel
+  th=$(( VIS * VIS / TOTAL )); [ "$th" -lt 1 ] && th=1
+  top=0
+  [ "$MAX_OFF" -gt 0 ] && top=$(( OFF * (VIS - th) / MAX_OFF ))
+  rel=$(( i - OFF ))
+  if [ "$rel" -ge "$top" ] && [ "$rel" -lt $(( top + th )) ]; then
+    printf '%s█%s' "$C_CYAN" "$C_RESET"
+  else
+    printf '%s│%s' "$C_GREY" "$C_RESET"
+  fi
+}
+
+draw_table() {
+  local sep_t sep_m sep_b
+  sep_t=$(printf '%s┌%s┬%s┬%s┬%s┬%s┐%s' "$C_CYAN" \
+    "$(repeat '─' $((COL_ID+2)))" "$(repeat '─' $((COL_NAME+2)))" "$(repeat '─' $((COL_STATUS+2)))" \
+    "$(repeat '─' $((COL_TRY+2)))" "$(repeat '─' $((COL_GATES+2)))" "$C_RESET")
+  sep_m=$(printf '%s├%s┼%s┼%s┼%s┼%s┤%s' "$C_CYAN" \
+    "$(repeat '─' $((COL_ID+2)))" "$(repeat '─' $((COL_NAME+2)))" "$(repeat '─' $((COL_STATUS+2)))" \
+    "$(repeat '─' $((COL_TRY+2)))" "$(repeat '─' $((COL_GATES+2)))" "$C_RESET")
+  sep_b=$(printf '%s└%s┴%s┴%s┴%s┴%s┘%s' "$C_CYAN" \
+    "$(repeat '─' $((COL_ID+2)))" "$(repeat '─' $((COL_NAME+2)))" "$(repeat '─' $((COL_STATUS+2)))" \
+    "$(repeat '─' $((COL_TRY+2)))" "$(repeat '─' $((COL_GATES+2)))" "$C_RESET")
+
+  local V="${C_CYAN}│${C_RESET}"
+
+  printf '%s\n' "$sep_t"
+  printf '%s %s %s %s %s %s %s %s %s %s %s\n' "$V" \
+    "${C_CYAN}$(pad 'ID' $COL_ID)${C_RESET}" "$V" \
+    "${C_CYAN}$(pad 'Fase / Task' $COL_NAME)${C_RESET}" "$V" \
+    "${C_CYAN}$(pad 'Status' $COL_STATUS)${C_RESET}" "$V" \
+    "${C_CYAN}$(pad 'Tentativa' $COL_TRY)${C_RESET}" "$V" \
+    "${C_CYAN}$(pad 'Gates' $COL_GATES)${C_RESET}" "$V"
+  printf '%s\n' "$sep_m"
+
+  local i
+  for ((i=OFF; i<OFF+VIS && i<TOTAL; i++)); do
+    printf '%s%s %s%s\n' "${ROW_HL[$i]}" "${ROWS[$i]}" "$(scroll_edge "$i")" "$C_RESET"
+  done
+  printf '%s\n' "$sep_b"
+
+  [ "$FOOTER" -eq 1 ] && draw_scroll_footer
+}
+
+draw_scroll_footer() {
+  local above=$OFF below=$(( TOTAL - OFF - VIS )) mode help=""
+  if $FOLLOW; then
+    mode="seguindo a fase atual"
+  else
+    mode="rolagem manual"
+  fi
+  if [ -n "${KEY_FD:-}" ]; then
+    help=" · ↑↓ PgUp/PgDn rolam · f segue a fase"
+    $EMBEDDED || help+=" · q sai"
+  fi
+  printf '%s  ▲ %d acima · ▼ %d abaixo · %s%s%s\n' \
+    "$C_GREY" "$above" "$below" "$mode" "$help" "$C_RESET"
+}
+
+render() {
+  printf '%s\n' "$HEAD"
   draw_table
   if [ -n "${META[note]:-}" ]; then
     printf '\n%s%s%s\n' "$C_YELLOW" "${META[note]}" "$C_RESET"
@@ -489,6 +663,79 @@ draw() {
 cleanup() {
   $EMBEDDED || { $ONCE || tput rmcup 2>/dev/null; }
   tput cnorm 2>/dev/null || true
+}
+
+# Teclado pelo /dev/tty, nao pelo stdin: com --embedded o painel e iniciado com
+# `&` pelo ralph, que roda sem job control — o filho fica no mesmo grupo de
+# processo em foreground, entao ler o terminal e permitido (nao ha SIGTTIN). O
+# ralph ja da `< /dev/null` no engine e nos testes e le o manifest pelo fd 3,
+# entao ninguem mais disputa essas teclas.
+KEY_FD=""
+
+open_keyboard() {
+  $ONCE && return 0
+  exec 3< /dev/tty 2>/dev/null && KEY_FD=3
+  return 0
+}
+
+scroll_by() { # <delta em linhas>
+  FOLLOW=false
+  OFF=$(( OFF + $1 ))
+  clamp_off
+}
+
+handle_key() { # <char lido>
+  local c="$1" seq="" tail=""
+  if [ "$c" = $'\033' ]; then
+    IFS= read -rsn2 -t 0.05 -u "$KEY_FD" seq || true
+    case "$seq" in
+      '[A') scroll_by -1 ;;
+      '[B') scroll_by 1 ;;
+      '[H') FOLLOW=false; OFF=0 ;;
+      '[F') FOLLOW=false; OFF=$MAX_OFF ;;
+      '[5'|'[6'|'[1'|'[4')
+        IFS= read -rsn1 -t 0.05 -u "$KEY_FD" tail || true   # engole o '~'
+        case "$seq" in
+          '[5') scroll_by -"$VIS" ;;
+          '[6') scroll_by "$VIS" ;;
+          '[1') FOLLOW=false; OFF=0 ;;
+          '[4') FOLLOW=false; OFF=$MAX_OFF ;;
+        esac
+        ;;
+    esac
+    return
+  fi
+  case "$c" in
+    k|K)   scroll_by -1 ;;
+    j|J)   scroll_by 1 ;;
+    b|B)   scroll_by -"$VIS" ;;
+    ' ')   scroll_by "$VIS" ;;
+    g)     FOLLOW=false; OFF=0 ;;
+    G)     FOLLOW=false; OFF=$MAX_OFF ;;
+    f|F)   FOLLOW=true ;;
+    # embutido no ralph o painel e dono da tela alternativa que o ralph abriu:
+    # sair aqui deixaria a tela congelada com o run ainda em andamento.
+    q|Q)   $EMBEDDED || QUIT=true ;;
+  esac
+}
+
+# Espera INTERVAL segundos, mas acorda na hora se o usuario apertar algo — e o
+# que faz a rolagem responder sem esperar o proximo frame.
+wait_tick() {
+  local c rc
+  if [ -z "$KEY_FD" ]; then
+    sleep "$INTERVAL"
+    return
+  fi
+  IFS= read -rsn1 -t "$INTERVAL" -u "$KEY_FD" c
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    handle_key "$c"
+  elif [ "$rc" -le 128 ]; then
+    # nao foi timeout: o tty sumiu. Desliga o teclado e volta ao sleep puro.
+    KEY_FD=""
+    exec 3<&- 2>/dev/null || true
+  fi
 }
 
 main() {
@@ -506,14 +753,18 @@ main() {
       echo "Nenhum estado em $RUN_STATE — o ralph ja rodou neste repo?" >&2
       exit 1
     fi
-    draw
+    build_frame
+    render
     exit 0
   fi
+
+  open_keyboard
 
   local frame
   while true; do
     if read_state; then
-      frame=$(draw)
+      build_frame
+      frame=$(render)
       printf '\033[H%s\033[J' "$frame"
       case "${META[status]:-running}" in
         finished|failed)
@@ -523,7 +774,8 @@ main() {
     else
       printf '\033[H%sAguardando o ralph iniciar (%s)…%s\033[J\n' "$C_GREY" "$RUN_STATE" "$C_RESET"
     fi
-    sleep "$INTERVAL"
+    wait_tick
+    $QUIT && break
   done
 }
 

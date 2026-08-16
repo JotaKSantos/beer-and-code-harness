@@ -234,12 +234,31 @@ Ou seja: durante a fase o painel mostra a intenção do agente; ao fim da fase m
 
 No engine **codex** não há stream equivalente — a granularidade fica por fase, e as tasks aparecem como pendentes até o veredito do gate 3.
 
+### Planos grandes: topo fixo e tabela rolante
+
+Com dezenas de tasks a tabela não cabe na tela. O painel então mantém **o topo fixo** (identificação, barras, trabalho atual) e faz a tabela de fases e tasks rolar dentro de uma janela do tamanho do terminal — com barra de rolagem na borda direita e um rodapé dizendo quanto ficou fora:
+
+```
+  ▲ 23 acima · ▼ 9 abaixo · seguindo a fase atual · ↑↓ PgUp/PgDn rolam · f segue a fase
+```
+
+Por padrão a janela **segue a fase corrente**: mostra o bloco da fase inteiro quando ele cabe e centra a task em execução quando não cabe. As teclas abaixo assumem o controle a qualquer momento e valem também com `--dashboard`, com o painel embutido no ralph:
+
+| Tecla | Efeito |
+|---|---|
+| `↑` `↓` ou `k` `j` | Rola uma linha |
+| `PgUp` `PgDn`, `b` ou espaço | Rola uma página |
+| `Home`/`g` e `End`/`G` | Primeira e última linha |
+| `f` | Volta a seguir a fase corrente |
+| `q` | Sai do painel (só no modo avulso; não interrompe o ralph) |
+
 | Opção do watch | Efeito |
 |---|---|
-| `--once` | Desenha um frame e sai (útil em script/CI) |
+| `--once` | Desenha um frame e sai (útil em script/CI); dump completo, sem recorte |
 | `--interval N` | Segundos entre frames (default: 1) |
 | `--no-color` | Desliga ANSI |
 | `RALPH_WATCH_COLS` | Fixa a largura, para terminal que não reporta |
+| `RALPH_WATCH_LINES` | Fixa a altura; com `--once` também liga a janela rolante |
 
 Com `--dashboard`, as linhas de log do ralph vão para `.phases/logs/ralph.log` (o painel é dono da tela) e o relatório final é impresso no terminal ao sair. Sem o `ralph-watch.sh` ao lado do `ralph.sh`, o `--dashboard` avisa e segue no modo de log — o `ralph.sh` continua sendo copiável sozinho para outro repositório.
 

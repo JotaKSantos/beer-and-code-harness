@@ -1039,6 +1039,61 @@ if case_enabled watch-task-total; then
 fi
 
 # ---------------------------------------------------------------------------
+# 33. Plano grande: o painel cabe na altura do terminal, o topo NAO some e a
+#     janela da tabela segue a fase corrente.
+#     Estado sintetico: o painel e um leitor puro, entao basta escrever o TSV.
+# ---------------------------------------------------------------------------
+if case_enabled watch-scroll; then
+  header "33. janela rolante mantem o cabecalho e segue a fase corrente"
+  d="$TMP/watch-scroll"
+  mkdir -p "$d/repo/.phases/state"
+  {
+    printf 'META\tproject\tbig\n'
+    printf 'META\tengine\tclaude\n'
+    printf 'META\tstatus\trunning\n'
+    printf 'META\tstarted\t%s\n' "$(date +%s)"
+    printf 'META\trun\ttest-run\n'
+    printf 'META\tpid\t1\n'
+    printf 'META\tphase_cur\t8\n'
+    for p in $(seq 1 12); do
+      st=pending; gates="pending pending pending pending"
+      [ "$p" -lt 8 ] && { st=done; gates="pass pass pass pass"; }
+      [ "$p" -eq 8 ] && { st=running; gates="pass pass run pending"; }
+      printf 'PHASE\t%s\t%s\t1\t%s\tFase numero %s\n' "$p" "$st" "$gates" "$p"
+      for t in $(seq 1 4); do
+        tst=pending
+        [ "$p" -lt 8 ] && tst=done
+        printf 'TASK\t%s\t%s\t%s\tTask %s da fase %s\n' "$p" "$t" "$tst" "$t" "$p"
+      done
+    done
+  } > "$d/repo/.phases/state/run.tsv"
+
+  RALPH_WATCH_COLS=110 RALPH_WATCH_LINES=30 \
+    "$ROOT/scripts/ralph-watch.sh" --once --no-color "$d/repo" > "$d/panel.txt" 2>&1
+
+  lines=$(wc -l < "$d/panel.txt")
+  if [ "$lines" -le 30 ]; then ok "painel cabe em 30 linhas ($lines)"
+  else bad "painel estourou a altura ($lines linhas para 30)"; fi
+
+  assert_contains "$d/panel.txt" "RALPH" "cabecalho continua visivel"
+  assert_contains "$d/panel.txt" "Fases  7/12" "barra de progresso continua visivel"
+  assert_contains "$d/panel.txt" "Fase numero 8" "fase corrente dentro da janela"
+  assert_contains "$d/panel.txt" "acima" "rodape indica o que ficou fora"
+  assert_not_contains "$d/panel.txt" "Fase numero 1 " "fase distante ficou fora da janela"
+
+  # sem altura fixada, --once segue sendo dump completo (contrato dos scripts)
+  RALPH_WATCH_COLS=110 "$ROOT/scripts/ralph-watch.sh" --once --no-color "$d/repo" > "$d/full.txt" 2>&1
+  assert_contains "$d/full.txt" "Fase numero 1 " "dump completo mantem a primeira fase"
+  assert_contains "$d/full.txt" "Fase numero 12" "dump completo mantem a ultima fase"
+
+  # plano curto: sem corte, sem rodape de rolagem
+  RALPH_WATCH_COLS=110 RALPH_WATCH_LINES=80 \
+    "$ROOT/scripts/ralph-watch.sh" --once --no-color "$d/repo" > "$d/tall.txt" 2>&1
+  assert_contains "$d/tall.txt" "Fase numero 1 " "terminal alto mostra tudo"
+  assert_not_contains "$d/tall.txt" "acima ·" "sem rodape de rolagem quando tudo cabe"
+fi
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$FAIL" -eq 0 ]; then

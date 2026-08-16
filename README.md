@@ -237,12 +237,31 @@ So: during the phase the panel shows the agent's intent; at the end of the phase
 
 On the **codex** engine there is no equivalent stream — granularity stays per phase, and tasks show as pending until gate 3's verdict.
 
+### Large plans: pinned top, scrolling table
+
+With dozens of tasks the table no longer fits on screen. The panel then keeps **the top pinned** (identification, bars, current work) and scrolls the phase/task table inside a window sized to the terminal — with a scrollbar on the right edge and a footer stating what fell outside:
+
+```
+  ▲ 23 above · ▼ 9 below · following the current phase · ↑↓ PgUp/PgDn scroll · f follows the phase
+```
+
+By default the window **follows the current phase**: it shows the whole phase block when it fits, and centers the running task when it doesn't. The keys below take over at any time and also work under `--dashboard`, with the panel embedded in ralph:
+
+| Key | Effect |
+|---|---|
+| `↑` `↓` or `k` `j` | Scrolls one line |
+| `PgUp` `PgDn`, `b` or space | Scrolls one page |
+| `Home`/`g` and `End`/`G` | First and last line |
+| `f` | Goes back to following the current phase |
+| `q` | Quits the panel (standalone mode only; does not stop ralph) |
+
 | Watch option | Effect |
 |---|---|
-| `--once` | Draws one frame and exits (useful in scripts/CI) |
+| `--once` | Draws one frame and exits (useful in scripts/CI); full dump, no clipping |
 | `--interval N` | Seconds between frames (default: 1) |
 | `--no-color` | Disables ANSI |
 | `RALPH_WATCH_COLS` | Pins the width, for terminals that don't report it |
+| `RALPH_WATCH_LINES` | Pins the height; with `--once` it also enables the scrolling window |
 
 With `--dashboard`, ralph's log lines go to `.phases/logs/ralph.log` (the panel owns the screen) and the final report prints to the terminal on exit. Without `ralph-watch.sh` next to `ralph.sh`, `--dashboard` warns and falls back to log mode — `ralph.sh` stays copyable on its own into another repository.
 
