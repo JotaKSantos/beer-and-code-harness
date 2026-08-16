@@ -245,6 +245,8 @@ With dozens of tasks the table no longer fits on screen. The panel then keeps **
   ▲ 23 above · ▼ 9 below · following the current phase · ↑↓ PgUp/PgDn scroll · f follows the phase
 ```
 
+The running line — phase and task — is **highlighted end to end**, so it can be spotted at a glance in a full table.
+
 By default the window **follows the current phase**: it shows the whole phase block when it fits, and centers the running task when it doesn't. The keys below take over at any time and also work under `--dashboard`, with the panel embedded in ralph:
 
 | Key | Effect |
@@ -260,6 +262,7 @@ By default the window **follows the current phase**: it shows the whole phase bl
 | `--once` | Draws one frame and exits (useful in scripts/CI); full dump, no clipping |
 | `--interval N` | Seconds between frames (default: 1) |
 | `--no-color` | Disables ANSI |
+| `--color` | Forces ANSI even without a terminal (tests, files) |
 | `RALPH_WATCH_COLS` | Pins the width, for terminals that don't report it |
 | `RALPH_WATCH_LINES` | Pins the height; with `--once` it also enables the scrolling window |
 

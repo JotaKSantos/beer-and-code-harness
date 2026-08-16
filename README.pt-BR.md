@@ -242,6 +242,8 @@ Com dezenas de tasks a tabela não cabe na tela. O painel então mantém **o top
   ▲ 23 acima · ▼ 9 abaixo · seguindo a fase atual · ↑↓ PgUp/PgDn rolam · f segue a fase
 ```
 
+A linha em execução — fase e task — fica **realçada de ponta a ponta**, para ser achada de relance na tabela cheia.
+
 Por padrão a janela **segue a fase corrente**: mostra o bloco da fase inteiro quando ele cabe e centra a task em execução quando não cabe. As teclas abaixo assumem o controle a qualquer momento e valem também com `--dashboard`, com o painel embutido no ralph:
 
 | Tecla | Efeito |
@@ -257,6 +259,7 @@ Por padrão a janela **segue a fase corrente**: mostra o bloco da fase inteiro q
 | `--once` | Desenha um frame e sai (útil em script/CI); dump completo, sem recorte |
 | `--interval N` | Segundos entre frames (default: 1) |
 | `--no-color` | Desliga ANSI |
+| `--color` | Força ANSI mesmo sem terminal (teste, arquivo) |
 | `RALPH_WATCH_COLS` | Fixa a largura, para terminal que não reporta |
 | `RALPH_WATCH_LINES` | Fixa a altura; com `--once` também liga a janela rolante |
 

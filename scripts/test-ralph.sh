@@ -1094,6 +1094,60 @@ if case_enabled watch-scroll; then
 fi
 
 # ---------------------------------------------------------------------------
+# 34. A linha em execucao fica realcada de ponta a ponta.
+#     \033[0m zera tambem o fundo: sem reinjetar o realce depois de cada reset,
+#     o destaque pintava so o primeiro separador e sumia na pratica.
+# ---------------------------------------------------------------------------
+if case_enabled watch-hilite; then
+  header "34. realce da linha em execucao cobre a linha inteira"
+  d="$TMP/watch-hilite"
+  mkdir -p "$d/repo/.phases/state"
+  {
+    printf 'META\tproject\thl\n'
+    printf 'META\tstatus\trunning\n'
+    printf 'META\tstarted\t%s\n' "$(date +%s)"
+    printf 'META\tphase_cur\t2\n'
+    printf 'PHASE\t1\tdone\t1\tpass pass pass pass\tFase pronta\n'
+    printf 'TASK\t1\t1\tdone\tTask pronta\n'
+    printf 'PHASE\t2\trunning\t1\tpass pass run pending\tFase viva\n'
+    printf 'TASK\t2\t1\tdone\tTask pronta da fase viva\n'
+    printf 'TASK\t2\t2\trunning\tTask em execucao agora\n'
+    printf 'PHASE\t3\tpending\t0\tpending pending pending pending\tFase futura\n'
+  } > "$d/repo/.phases/state/run.tsv"
+
+  RALPH_WATCH_COLS=110 "$ROOT/scripts/ralph-watch.sh" --once --color "$d/repo" > "$d/color.txt" 2>&1
+
+  # Cada reset dentro da linha e seguido de um novo realce; o unico reset sem
+  # realce depois e o do fim da linha. Logo: #realces == #resets.
+  # tail -1: "Fase viva" tambem aparece no painel TRABALHO ATUAL, acima da
+  # tabela — a linha que interessa e a ultima.
+  hl_balanced() { # <trecho da linha> -> "resets realces"
+    grep -a "$1" "$d/color.txt" | tail -1 \
+      | awk 'BEGIN{esc=sprintf("%c",27)}
+             { r=gsub(esc"\\[0m",""); h=gsub(esc"\\[48;5;53m",""); print r" "h }'
+  }
+
+  assert_eq "$(echo "$(hl_balanced 'Fase viva')" | cut -d' ' -f1)" \
+            "$(echo "$(hl_balanced 'Fase viva')" | cut -d' ' -f2)" \
+            "fase em execucao: realce reaplicado apos cada reset"
+  assert_eq "$(echo "$(hl_balanced 'Task em execucao agora')" | cut -d' ' -f1)" \
+            "$(echo "$(hl_balanced 'Task em execucao agora')" | cut -d' ' -f2)" \
+            "task em execucao: realce reaplicado apos cada reset"
+
+  # o realce nao vaza para as linhas paradas
+  assert_eq "0" "$(echo "$(hl_balanced 'Fase futura')" | cut -d' ' -f2)" \
+            "linha pendente sem realce"
+  assert_eq "0" "$(echo "$(hl_balanced 'Task pronta da fase viva')" | cut -d' ' -f2)" \
+            "task concluida sem realce"
+
+  # mais de um caractere realcado: o bug antigo pintava so o separador inicial
+  wide=$(grep -a "Task em execucao agora" "$d/color.txt" | tail -1 \
+    | awk 'BEGIN{esc=sprintf("%c",27)} { print gsub(esc"\\[48;5;53m","") }')
+  if [ "${wide:-0}" -ge 4 ]; then ok "realce atravessa as colunas da linha ($wide trechos)"
+  else bad "realce cobriu poucos trechos da linha (${wide:-0})"; fi
+fi
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$FAIL" -eq 0 ]; then

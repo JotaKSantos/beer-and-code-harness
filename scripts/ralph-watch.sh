@@ -18,6 +18,7 @@
 #   --embedded          modo chamado pelo ralph: nao troca a tela alternativa
 #                       (quem chamou ja trocou) e sai quando o run termina
 #   --no-color          desliga ANSI
+#   --color             forca ANSI mesmo sem terminal (teste)
 #
 # Layout: o topo (identificacao, barras, trabalho atual) e fixo; a tabela de
 # fases e tasks rola dentro de uma janela que cabe na altura do terminal. Sem
@@ -62,6 +63,7 @@ ONCE=false
 EMBEDDED=false
 INTERVAL=1
 USE_COLOR=true
+FORCE_COLOR=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -70,12 +72,14 @@ while [[ $# -gt 0 ]]; do
     --interval)   INTERVAL="$2"; shift 2 ;;
     --interval=*) INTERVAL="${1#*=}"; shift ;;
     --no-color)   USE_COLOR=false; shift ;;
+    --color)      FORCE_COLOR=true; shift ;;
     -h|--help)    sed -n '2,56p' "$0"; exit 0 ;;
     *)            REPO="$1"; shift ;;
   esac
 done
 
-[ -t 1 ] || USE_COLOR=false
+# --color mantem o ANSI quando a saida nao e um terminal (teste, arquivo).
+$FORCE_COLOR || [ -t 1 ] || USE_COLOR=false
 
 STATE_DIR="$REPO/.phases/state"
 RUN_STATE="$STATE_DIR/run.tsv"
@@ -624,9 +628,20 @@ draw_table() {
     "${C_CYAN}$(pad 'Gates' $COL_GATES)${C_RESET}" "$V"
   printf '%s\n' "$sep_m"
 
-  local i
+  local i hl body edge
   for ((i=OFF; i<OFF+VIS && i<TOTAL; i++)); do
-    printf '%s%s %s%s\n' "${ROW_HL[$i]}" "${ROWS[$i]}" "$(scroll_edge "$i")" "$C_RESET"
+    hl="${ROW_HL[$i]}"
+    body="${ROWS[$i]}"
+    edge=$(scroll_edge "$i")
+    if [ -n "$hl" ]; then
+      # C_RESET (\033[0m) zera tambem o fundo. Sem reinjetar o realce depois de
+      # cada reset, o destaque da linha em execucao morria no primeiro separador
+      # e so pintava um caractere — o efeito util (achar a linha viva de
+      # relance) desaparecia justamente na tabela cheia.
+      body="${body//"$C_RESET"/$C_RESET$hl}"
+      edge="${edge//"$C_RESET"/$C_RESET$hl}"
+    fi
+    printf '%s%s %s%s\n' "$hl" "$body" "$edge" "$C_RESET"
   done
   printf '%s\n' "$sep_b"
 
