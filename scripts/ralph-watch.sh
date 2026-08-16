@@ -276,6 +276,9 @@ TOTAL=0
 MAX_OFF=0
 FOOTER=0
 HEAD=""
+LAST_W=0
+LAST_H=0
+RESIZED=false
 
 # RALPH_WATCH_COLS fixa a largura (teste, pipe, terminal que nao reporta).
 #
@@ -746,8 +749,10 @@ wait_tick() {
   rc=$?
   if [ "$rc" -eq 0 ]; then
     handle_key "$c"
-  elif [ "$rc" -le 128 ]; then
-    # nao foi timeout: o tty sumiu. Desliga o teclado e volta ao sleep puro.
+  elif [ "$rc" -le 128 ] && [ ! -t "$KEY_FD" ]; then
+    # Nao foi timeout e o fd nao e mais um terminal: o tty sumiu de verdade.
+    # (Um sinal — SIGWINCH ao redimensionar — tambem interrompe o read; ali o
+    # fd continua sendo tty e o teclado precisa continuar de pe.)
     KEY_FD=""
     exec 3<&- 2>/dev/null || true
   fi
@@ -775,11 +780,20 @@ main() {
 
   open_keyboard
 
+  # Redimensionar reflui o painel inteiro: as linhas do frame anterior, que o
+  # terminal quebrou na largura antiga, sobram na tela e embaralham o topo.
+  # \033[H + \033[J so limpam do cursor para baixo — o que ficou acima
+  # permanece. Numa mudanca de tamanho, limpa a tela toda antes de redesenhar.
+  trap 'RESIZED=true' WINCH
   local frame
   while true; do
     if read_state; then
       build_frame
       frame=$(render)
+      if $RESIZED || [ "$W" != "$LAST_W" ] || [ "$H" != "$LAST_H" ]; then
+        printf '\033[2J'
+        LAST_W=$W; LAST_H=$H; RESIZED=false
+      fi
       printf '\033[H%s\033[J' "$frame"
       case "${META[status]:-running}" in
         finished|failed)
