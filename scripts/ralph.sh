@@ -585,6 +585,40 @@ phase_task_titles() {
     || true
 }
 
+# Arquivos que cada task declara, para o painel saber em qual task o agente
+# esta so de ver o que ele edita. Um plano do /plan traz "Arquivos: `caminho`"
+# no corpo do item; e o sinal mais confiavel que existe sem depender de o
+# modelo cooperar com nenhum protocolo.
+#
+# Emite: <indice-da-task><TAB><peso><TAB><caminho>
+#   peso 1 = declarado na linha "Arquivos:" (o alvo da task)
+#   peso 2 = citado em outro ponto do corpo (referencia, espelho, exemplo)
+phase_task_files() {
+  local phase_file="$1"
+  [ -f "$PHASES_DIR/$phase_file" ] || return 0
+  awk '
+    # extensoes que caracterizam arquivo de codigo/config; sem isso tokens como
+    # "services.iss_rate" (coluna) entrariam como se fossem caminho
+    BEGIN {
+      split("php js jsx ts tsx vue py rb go rs java kt swift cs sql md yml yaml json xml css scss sass html blade twig sh bash env lock toml ini cfg conf tf gradle", e, " ")
+      for (i in e) ext[e[i]] = 1
+    }
+    /^[[:space:]]*- \[[ xX]\]/ { idx++ }
+    idx == 0 { next }
+    {
+      line = $0
+      lvl = (line ~ /Arquivos?:/) ? 1 : 2
+      while (match(line, /[A-Za-z0-9_][A-Za-z0-9_.\/-]*\.[A-Za-z0-9]+/)) {
+        p = substr(line, RSTART, RLENGTH)
+        line = substr(line, RSTART + RLENGTH)
+        n = split(p, parts, ".")
+        if (!(parts[n] in ext)) continue
+        print idx "\t" lvl "\t" p
+      }
+    }
+  ' "$PHASES_DIR/$phase_file" 2>/dev/null || true
+}
+
 state_flush() {
   local tmp="$RUN_STATE.$$"
   {
@@ -778,19 +812,50 @@ stream_watch() {
   local live="$1" phase_num="$2" quiet="$3" phase_file="${4:-}"
   local -A st=() idx_of=()
   local -a pending_create=() task_titles=()
+  local -a decl_task=() decl_lvl=() decl_path=()
   local next=0 activity="" line tool val tid status idx
   local agent_list_used=0 inferred_max=0
 
   # Titulos das tasks, para casar caminho de arquivo -> task.
   if [ -n "$phase_file" ]; then
     while IFS= read -r val; do task_titles+=("$val"); done < <(phase_task_titles "$phase_file")
+    # Arquivos declarados por task: o sinal forte, quando o plano os declara.
+    while IFS=$'\t' read -r val status tool; do
+      [ -n "${tool:-}" ] || continue
+      decl_task+=("$val"); decl_lvl+=("$status"); decl_path+=("$tool")
+    done < <(phase_task_files "$phase_file")
+    status=""; tool=""; val=""
   fi
 
-  # Qual task menciona este arquivo? Casa pelo caminho citado no enunciado
-  # (`src/Money.php`) e, se nao achar, pelo nome do arquivo.
+  # Qual task corresponde a este arquivo?
+  #
+  # 1) caminho declarado pela propria task ("Arquivos: `app/Models/X.php`") —
+  #    o agente edita com caminho absoluto, entao basta ser sufixo;
+  # 2) mesmo nome de arquivo entre os declarados;
+  # 3) caminho citado em outro ponto do corpo da task (referencia);
+  # 4) enunciado da task mencionando o caminho ou o nome do arquivo.
+  #
+  # A ordem importa: o corpo de uma task costuma citar arquivos de outras
+  # (o modelo a espelhar, o teste que a cobre), e casar por esses primeiro
+  # jogaria o progresso para a task errada.
   sw_task_for_file() {
-    local path="$1" base i t
+    local path="$1" base i t lvl
     base=$(basename -- "$path")
+    for lvl in 1 2; do
+      for i in "${!decl_path[@]}"; do
+        [ "${decl_lvl[$i]}" = "$lvl" ] || continue
+        t="${decl_path[$i]}"
+        if [ "$path" = "$t" ] || [[ "$path" == *"/$t" ]]; then
+          printf '%s' "${decl_task[$i]}"; return 0
+        fi
+      done
+      [ "$lvl" = "1" ] || continue
+      for i in "${!decl_path[@]}"; do
+        [ "${decl_lvl[$i]}" = "1" ] || continue
+        [ "$(basename -- "${decl_path[$i]}")" = "$base" ] || continue
+        printf '%s' "${decl_task[$i]}"; return 0
+      done
+    done
     for i in "${!task_titles[@]}"; do
       t="${task_titles[$i]}"
       if [[ "$t" == *"$path"* ]] || [[ "$t" == *"$base"* ]]; then
@@ -835,6 +900,12 @@ stream_watch() {
     [ "$quiet" = "1" ] && return 0
     echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC}   $1"
   }
+
+  # Sinal de vida imediato: a sessao comecou, logo o primeiro item esta em
+  # andamento. Sem isto a fase inteira aparecia "Pendente" ate o primeiro
+  # evento reconhecido — que, sem lista de tarefas, podia nunca chegar.
+  st[1]="running"
+  sw_flush
 
   while IFS= read -r line; do
     case "$line" in

@@ -1148,6 +1148,74 @@ if case_enabled watch-hilite; then
 fi
 
 # ---------------------------------------------------------------------------
+# 35. REGRESSAO (run real): sessao headless sem NENHUMA ferramenta de lista de
+#     tarefas — o agente tenta carregar TaskCreate/TodoWrite com ToolSearch e
+#     elas nao existem. O progresso tem que sair dos arquivos que a propria
+#     task declara em "Arquivos:", senao a fase inteira fica "Pendente" e so
+#     muda no gate 3.
+# ---------------------------------------------------------------------------
+if case_enabled live-declared-files; then
+  header "35. progresso pelos arquivos declarados, sem lista de tarefas"
+  d="$TMP/live-declared-files"
+  mkdir -p "$d/.phases"
+
+  cat > "$d/.phases/phase-02.md" <<'PH'
+## Phase 2: Schema, model e escrita
+
+Espelhar `app/Models/ProductFiscalSetting.php` e `app/Services/Catalog/SaveProductFiscalSettingsService.php`.
+
+- [ ] T03 — Migração `service_fiscal_settings` (aditiva)
+      Arquivos: `database/migrations/tenant/2026_08_15_120000_create_service_fiscal_settings_table.php`
+      Mudança: `iss_rate` `decimal(5,2)` como em `services.iss_rate`
+- [ ] T04 — Model `ServiceFiscalSetting`, factory e relação
+      Arquivos: `app/Models/ServiceFiscalSetting.php`, `database/factories/ServiceFiscalSettingFactory.php`
+      Mudança: espelha `app/Models/ProductFiscalSetting.php`
+- [ ] T05 — `SaveServiceFiscalSettingsService`
+      Arquivos: `app/Services/Catalog/SaveServiceFiscalSettingsService.php`
+- [ ] T06 — Testes
+      Arquivos: `tests/Feature/Catalog/ServiceFiscalSettingsTest.php`
+PH
+
+  # Stream do run real: ToolSearch nao acha lista de tarefas; so Read/Edit/Write.
+  cat > "$d/stream.jsonl" <<'STREAM'
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"ToolSearch","input":{"query":"select:TaskCreate,TaskUpdate"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"ToolSearch","input":{"query":"select:TodoWrite"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/repo/app/Models/ProductFiscalSetting.php"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/repo/database/migrations/tenant/2026_08_15_120000_create_service_fiscal_settings_table.php","content":"..."}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/repo/app/Models/ServiceFiscalSetting.php","content":"..."}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/repo/app/Services/Catalog/SaveServiceFiscalSettingsService.php","content":"..."}}]}}
+STREAM
+
+  (
+    RALPH_LIB_ONLY=1
+    export RALPH_LIB_ONLY
+    # shellcheck disable=SC1090
+    source "$RALPH" 2>/dev/null
+    set +e
+    PHASES_DIR="$d/.phases"
+    stream_watch "$d/live.tsv" 2 1 phase-02.md < "$d/stream.jsonl" > /dev/null
+  )
+
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t1\tdone')" "task 1 (migração) concluida"
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t2\tdone')" "task 2 (model) concluida"
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t3\trunning')" "task 3 (service) em execucao"
+  assert_not_contains "$d/live.tsv" "$(printf 'LIVE\t4\tdone')" "task 4 (testes) ainda nao concluida"
+
+  # o Read do arquivo-espelho citado no preambulo nao pode empurrar o progresso
+  (
+    RALPH_LIB_ONLY=1
+    export RALPH_LIB_ONLY
+    # shellcheck disable=SC1090
+    source "$RALPH" 2>/dev/null
+    set +e
+    PHASES_DIR="$d/.phases"
+    head -3 "$d/stream.jsonl" | stream_watch "$d/early.tsv" 2 1 phase-02.md > /dev/null
+  )
+  assert_contains "$d/early.tsv" "$(printf 'LIVE\t1\trunning')" "antes da 1a escrita: task 1 em execucao"
+  assert_not_contains "$d/early.tsv" "$(printf 'LIVE\t2\t')" "leitura de arquivo-espelho nao promove task"
+fi
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$FAIL" -eq 0 ]; then
