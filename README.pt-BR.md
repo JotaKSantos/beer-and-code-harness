@@ -225,10 +225,14 @@ O ralph publica o estado do run em `.phases/state/` **sempre**, com ou sem `--da
 
 Uma fase é **uma** sessão de agente, então o ralph não teria como saber onde a sessão está — a menos que a sessão conte. No engine claude ela conta:
 
-1. O prompt manda o agente registrar **uma tarefa por item `- [ ]` da fase**, na mesma ordem, e marcá-la em andamento antes de começar e concluída só quando código e testes daquele item passarem.
-2. A sessão roda com `--output-format stream-json`, que emite eventos linha a linha **enquanto** trabalha. O ralph lê as transições da lista de tarefas do agente e as reescreve em `.phases/state/live.tsv`.
-3. Se o modelo **não usar** a lista de tarefas (acontece — as ferramentas são deferidas e ele pode simplesmente não carregá-las), entra uma reserva observacional: o ralph casa o arquivo que ele escreve com a task que menciona aquele arquivo. É palpite, mas mostra movimento real em vez de deixar a fase inteira "pendente".
-4. No fim da fase, o **gate 3 tem a palavra final**: o veredito `TASK <n>: DONE/INCOMPLETE` do verificador sobrepõe tanto a lista do agente quanto o palpite da reserva. Uma task marcada como pronta que não está no código aparece como `! Incompleta`.
+A sessão roda com `--output-format stream-json`, que emite eventos linha a linha **enquanto** trabalha. O ralph lê esse stream e reescreve o progresso em `.phases/state/live.tsv`, de quatro fontes, nesta ordem de precedência:
+
+1. **Marcadores de texto** (fonte primária). O prompt manda o agente escrever, como linha isolada, `RALPH-TASK <n> START` antes de começar o item *n* e `RALPH-TASK <n> DONE` quando ele estiver pronto. É texto puro: **não depende de ferramenta nenhuma** — e isso é o que importa, porque em sessão headless (`claude -p`) as ferramentas de lista de tarefas simplesmente não existem, mesmo que o agente tente carregá-las com `ToolSearch`.
+2. **Lista de tarefas do agente**, quando a sessão tiver uma (`TaskCreate`/`TaskUpdate` ou `TodoWrite`): as transições `in_progress`/`completed` viram progresso.
+3. **Reserva observacional** — sem marcador e sem lista, o ralph deduz pelo que o agente edita. Um plano do `/plan` declara `Arquivos:` em cada item, e é esse casamento (caminho editado ↔ arquivo declarado pela task) que dá a granularidade; sem a declaração, cai no enunciado da task. Ao entrar numa task, as anteriores contam como concluídas — o agente trabalha em ordem, e nem toda task tem arquivo próprio.
+4. **Sinal de vida**: assim que a sessão abre, a task 1 aparece em execução — nunca uma fase inteira parada em "Pendente".
+
+No fim da fase, o **gate 3 tem a palavra final**: o veredito `TASK <n>: DONE/INCOMPLETE` do verificador sobrepõe marcador, lista e dedução. Uma task marcada como pronta que não está no código aparece como `! Incompleta`.
 
 Ou seja: durante a fase o painel mostra a intenção do agente; ao fim da fase mostra a verdade verificada.
 

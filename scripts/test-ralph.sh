@@ -1216,6 +1216,81 @@ STREAM
 fi
 
 # ---------------------------------------------------------------------------
+# 36. Protocolo textual: o agente anuncia a task em linhas RALPH-TASK. Nao
+#     depende de ferramenta nenhuma, entao funciona em sessao headless — e tem
+#     precedencia sobre o palpite baseado em arquivo.
+# ---------------------------------------------------------------------------
+if case_enabled live-markers; then
+  header "36. marcadores RALPH-TASK comandam o progresso"
+  d="$TMP/live-markers"
+  mkdir -p "$d/.phases"
+
+  cat > "$d/.phases/phase-03.md" <<'PH'
+## Phase 3: API
+
+- [ ] T01 — Endpoint de leitura
+      Arquivos: `app/Http/Controllers/ReadController.php`
+- [ ] T02 — Endpoint de escrita
+      Arquivos: `app/Http/Controllers/WriteController.php`
+- [ ] T03 — Testes de contrato
+      Arquivos: `tests/Feature/ApiContractTest.php`
+PH
+
+  cat > "$d/stream.jsonl" <<'STREAM'
+{"type":"assistant","message":{"content":[{"type":"text","text":"Vou começar.\n\nRALPH-TASK 1 START"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/repo/app/Http/Controllers/ReadController.php","content":"..."}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"RALPH-TASK 1 DONE"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"RALPH-TASK 2 START"}]}}
+STREAM
+
+  (
+    RALPH_LIB_ONLY=1
+    export RALPH_LIB_ONLY
+    # shellcheck disable=SC1090
+    source "$RALPH" 2>/dev/null
+    set +e
+    PHASES_DIR="$d/.phases"
+    stream_watch "$d/live.tsv" 3 1 phase-03.md < "$d/stream.jsonl" > /dev/null
+  )
+
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t1\tdone')" "task 1 fechada pelo marcador DONE"
+  assert_contains "$d/live.tsv" "$(printf 'LIVE\t2\trunning')" "task 2 aberta pelo marcador START"
+  assert_not_contains "$d/live.tsv" "$(printf 'LIVE\t3\t')" "task 3 intocada"
+
+  # marcador de START pula tasks: as anteriores contam como feitas
+  cat > "$d/jump.jsonl" <<'STREAM'
+{"type":"assistant","message":{"content":[{"type":"text","text":"RALPH-TASK 3 START"}]}}
+STREAM
+  (
+    RALPH_LIB_ONLY=1
+    export RALPH_LIB_ONLY
+    # shellcheck disable=SC1090
+    source "$RALPH" 2>/dev/null
+    set +e
+    PHASES_DIR="$d/.phases"
+    stream_watch "$d/jump.tsv" 3 1 phase-03.md < "$d/jump.jsonl" > /dev/null
+  )
+  assert_contains "$d/jump.tsv" "$(printf 'LIVE\t2\tdone')" "START da task 3 fecha as anteriores"
+  assert_contains "$d/jump.tsv" "$(printf 'LIVE\t3\trunning')" "task 3 em execucao"
+
+  # o texto do PROMPT usa <n> literal: nunca pode virar um marcador
+  cat > "$d/prompt.jsonl" <<'STREAM'
+{"type":"user","message":{"content":"    RALPH-TASK <n> START     antes de comecar o item n"}}
+STREAM
+  (
+    RALPH_LIB_ONLY=1
+    export RALPH_LIB_ONLY
+    # shellcheck disable=SC1090
+    source "$RALPH" 2>/dev/null
+    set +e
+    PHASES_DIR="$d/.phases"
+    stream_watch "$d/prompt.tsv" 3 1 phase-03.md < "$d/prompt.jsonl" > /dev/null
+  )
+  assert_contains "$d/prompt.tsv" "$(printf 'LIVE\t1\trunning')" "eco do prompt nao move o progresso"
+  assert_not_contains "$d/prompt.tsv" "$(printf 'LIVE\t2\t')" "eco do prompt nao cria tasks"
+fi
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$FAIL" -eq 0 ]; then

@@ -228,10 +228,14 @@ ralph publishes run state to `.phases/state/` **always**, with or without `--das
 
 A phase is **one** agent session, so ralph could not know where the session is — unless the session says so. On the claude engine it does:
 
-1. The prompt tells the agent to register **one task per `- [ ]` item of the phase**, in the same order, marking it in progress before starting and completed only when that item's code and tests pass.
-2. The session runs with `--output-format stream-json`, which emits events line by line **while** it works. ralph reads the agent's task-list transitions and rewrites them into `.phases/state/live.tsv`.
-3. If the model **doesn't use** the task list (it happens — the tools are deferred and it may simply not load them), an observational fallback kicks in: ralph matches the file being written to the task that mentions that file. It's a guess, but it shows real movement instead of leaving the whole phase "pending".
-4. At the end of the phase, **gate 3 has the last word**: the verifier's `TASK <n>: DONE/INCOMPLETE` verdict overrides both the agent's list and the fallback's guess. A task marked done but not in the code shows up as `! Incompleta`.
+The session runs with `--output-format stream-json`, which emits events line by line **while** it works. ralph reads that stream and rewrites progress into `.phases/state/live.tsv`, from four sources, in this order of precedence:
+
+1. **Text markers** (primary source). The prompt tells the agent to write, as a standalone line, `RALPH-TASK <n> START` before starting item *n* and `RALPH-TASK <n> DONE` once it is ready. It is plain text: it **depends on no tool at all** — which is what matters, because in a headless session (`claude -p`) task-list tools simply do not exist, even when the agent tries to load them via `ToolSearch`.
+2. **The agent's task list**, when the session has one (`TaskCreate`/`TaskUpdate` or `TodoWrite`): its `in_progress`/`completed` transitions become progress.
+3. **Observational fallback** — with no marker and no list, ralph infers from what the agent edits. A `/plan` plan declares `Arquivos:` on every item, and it is that match (edited path ↔ file declared by the task) that provides the granularity; without the declaration it falls back to the task's own text. On entering a task the earlier ones count as done — the agent works in order, and not every task has a file of its own.
+4. **Sign of life**: as soon as the session opens, task 1 shows as running — never a whole phase frozen at "Pendente".
+
+At the end of the phase, **gate 3 has the last word**: the verifier's `TASK <n>: DONE/INCOMPLETE` verdict overrides marker, list and inference alike. A task marked done but not in the code shows up as `! Incompleta`.
 
 So: during the phase the panel shows the agent's intent; at the end of the phase it shows the verified truth.
 

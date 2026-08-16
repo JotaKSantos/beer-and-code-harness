@@ -814,7 +814,7 @@ stream_watch() {
   local -a pending_create=() task_titles=()
   local -a decl_task=() decl_lvl=() decl_path=()
   local next=0 activity="" line tool val tid status idx
-  local agent_list_used=0 inferred_max=0
+  local agent_list_used=0 inferred_max=0 marker_used=0
 
   # Titulos das tasks, para casar caminho de arquivo -> task.
   if [ -n "$phase_file" ]; then
@@ -901,6 +901,43 @@ stream_watch() {
     echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC}   $1"
   }
 
+  # Marcadores RALPH-TASK <n> START|DONE emitidos pelo agente como texto. Sao a
+  # fonte primaria: ao contrario da lista de tarefas, existem em sessao headless
+  # (onde TaskCreate/TodoWrite simplesmente nao estao disponiveis, mesmo depois
+  # de o agente tentar carrega-las com ToolSearch).
+  sw_markers() {
+    local raw="$1" m n verb hit=0 i
+    # `|| [ -n "$m" ]`: o ultimo match pode chegar sem quebra de linha final
+    while IFS= read -r m || [ -n "$m" ]; do
+      [ -n "$m" ] || continue
+      n="${m#RALPH-TASK }"; n="${n%% *}"
+      verb="${m##* }"
+      [[ "$n" =~ ^[0-9]+$ ]] || continue
+      if [ "$marker_used" -eq 0 ]; then
+        # o protocolo textual assumiu: descarta o que a reserva inferiu
+        marker_used=1
+        st=()
+      fi
+      case "$verb" in
+        START)
+          # as anteriores ficam concluidas: o agente trabalha em ordem e nao
+          # emite DONE de todas quando emenda um item no outro
+          for ((i = 1; i < n; i++)); do [ -n "${st[$i]:-}" ] || st["$i"]="done"; done
+          [ "${st[$n]:-}" = "done" ] || st["$n"]="running"
+          sw_say "task $n em execucao"
+          ;;
+        DONE)
+          st["$n"]="done"
+          sw_say "task $n concluida"
+          ;;
+      esac
+      hit=1
+    done < <(grep -oE 'RALPH-TASK[[:space:]]+[0-9]+[[:space:]]+(START|DONE)' <<< "$raw" \
+             | tr -s '[:blank:]' ' ' || true)
+    [ "$hit" -eq 1 ] && sw_flush
+    return 0
+  }
+
   # Sinal de vida imediato: a sessao comecou, logo o primeiro item esta em
   # andamento. Sem isto a fase inteira aparecia "Pendente" ate o primeiro
   # evento reconhecido — que, sem lista de tarefas, podia nunca chegar.
@@ -908,6 +945,11 @@ stream_watch() {
   sw_flush
 
   while IFS= read -r line; do
+    # marcadores podem vir em qualquer bloco de texto do assistente
+    case "$line" in
+      *RALPH-TASK*) sw_markers "$line" ;;
+    esac
+    [ "$marker_used" -eq 1 ] && agent_list_used=1   # a reserva por arquivo cala
     case "$line" in
       # --- lista de tarefas: TaskCreate / TaskUpdate (CLI 2.x) --------------
       *'"name":"TaskCreate"'*)
@@ -1028,27 +1070,28 @@ task_protocol_block() {
   [[ "$ENGINE" == "claude" ]] || return 0
   cat <<'PROTO'
 
-## Protocolo de progresso (obrigatorio, faca isto PRIMEIRO)
-As ferramentas de lista de tarefas podem estar em modo deferido nesta sessao —
-nesse caso elas NAO aparecem na sua lista de ferramentas ate serem carregadas.
-Antes de qualquer outra coisa:
+## Protocolo de progresso (obrigatorio)
+Um orquestrador externo le a sua saida em tempo real para mostrar ao operador
+humano em qual item desta fase voce esta. O canal e TEXTO PURO, nao depende de
+ferramenta nenhuma: escreva, como uma linha isolada da sua resposta,
 
-1. Carregue-as com ToolSearch: `select:TaskCreate,TaskUpdate`
-   (se este CLI usar TodoWrite em vez disso, carregue `select:TodoWrite`).
-2. Crie UMA tarefa para CADA item `- [ ]` desta fase, na MESMA ORDEM e com o
-   mesmo texto do item. Nao agrupe dois itens numa tarefa, nao reordene, nao
-   crie tarefas extras de apoio.
+    RALPH-TASK <n> START     antes de comecar o item n
+    RALPH-TASK <n> DONE      quando o codigo E os testes do item n estiverem prontos
 
-Enquanto trabalha:
-- marque a tarefa como em andamento (`in_progress`) ANTES de comecar a
-  implementa-la;
-- marque como concluida (`completed`) so quando o codigo E os testes daquele
-  item estiverem prontos e passando;
-- trabalhe em uma tarefa por vez, na ordem.
+onde `<n>` e a posicao do item `- [ ]` nesta fase (1 para o primeiro, 2 para o
+segundo, e assim por diante — nao use o codigo T03/T12 do enunciado).
 
-Isto nao e burocracia: um orquestrador externo acompanha essas transicoes em
-tempo real para mostrar o progresso da fase. Sem elas o operador humano fica
-sem nenhuma visibilidade do que voce esta fazendo enquanto a sessao roda.
+Regras:
+- trabalhe em um item por vez, na ordem;
+- emita o START antes da primeira edicao daquele item e o DONE so quando ele
+  estiver realmente pronto;
+- nao emita DONE de um item que voce nao implementou;
+- as duas linhas sao obrigatorias mesmo que o item seja pequeno.
+
+Se a sua sessao tiver ferramenta de lista de tarefas (TaskCreate/TaskUpdate ou
+TodoWrite), use-a tambem, com uma tarefa por item na mesma ordem — mas as
+linhas `RALPH-TASK` continuam obrigatorias: em sessao headless essa ferramenta
+costuma nao existir, e sem as linhas o operador fica cego durante a fase.
 PROTO
 }
 
