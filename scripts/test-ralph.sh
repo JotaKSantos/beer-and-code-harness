@@ -1291,6 +1291,93 @@ STREAM
 fi
 
 # ---------------------------------------------------------------------------
+# 37. REGRESSAO do desenho: o quadro nunca pode rolar a tela nem deixar pedaco
+#     do quadro anterior por baixo do novo.
+#
+#     Os dois defeitos eram um mecanismo em cadeia. Primeiro o quadro estourava
+#     a altura (o piso de 3 linhas de tabela mantinha 20 linhas de painel mesmo
+#     numa tela de 12) e o terminal ROLAVA. Dali em diante o \033[H escrevia numa
+#     tela deslocada, e como o \033[J so limpa do fim do quadro para baixo, as
+#     tres linhas em branco do cabecalho e o "RALPH" — curto — nao apagavam o que
+#     havia embaixo: o topo ficava com um "RALPHks 19/32", metade quadro novo e
+#     metade quadro velho, ate alguem redimensionar a janela.
+# ---------------------------------------------------------------------------
+if case_enabled watch-frame; then
+  header "37. o quadro respeita a altura da tela e limpa cada linha"
+  WATCH="$ROOT/scripts/ralph-watch.sh"
+
+  # -- unidade: clamp_lines nunca devolve mais linhas do que o teto ------------
+  (
+    RALPH_LIB_ONLY=1
+    export RALPH_LIB_ONLY RALPH_WATCH_COLS=110
+    # shellcheck disable=SC1090
+    source "$WATCH" 2>/dev/null
+    out=""
+    clamp_lines out "$(printf 'a\nb\nc\nd\ne')" 3
+    printf '%s' "$out" > "$TMP/clamp3.txt"
+    clamp_lines out "$(printf 'a\nb')" 9
+    printf '%s' "$out" > "$TMP/clamp9.txt"
+  )
+  n=$(wc -l < "$TMP/clamp3.txt")
+  # 3 linhas sem \n final = 2 quebras: e o que ocupa exatamente 3 linhas da tela
+  if [ "$n" -eq 2 ]; then ok "clamp_lines corta no teto de linhas"
+  else bad "clamp_lines devolveu $n quebras, esperado 2"; fi
+  assert_contains "$TMP/clamp3.txt" "c" "clamp_lines mantem as linhas de cima"
+  assert_not_contains "$TMP/clamp3.txt" "d" "clamp_lines descarta o excedente"
+  assert_contains "$TMP/clamp9.txt" "b" "clamp_lines nao mexe no que ja cabe"
+
+  # -- integracao: painel real num terminal baixo -----------------------------
+  # tmux e o unico jeito de ver a tela como o terminal a monta (rolagem inclusa).
+  # Ausencia nao falha o check, mesma politica do shellcheck no check-shell.sh.
+  if command -v tmux > /dev/null 2>&1; then
+    d="$TMP/watch-frame"
+    mkdir -p "$d/repo/.phases/state"
+    {
+      printf 'META\tproject\tframe\n'
+      printf 'META\tengine\tclaude\n'
+      printf 'META\tstatus\trunning\n'
+      printf 'META\tstarted\t%s\n' "$(date +%s)"
+      printf 'META\trun\tframe-run\n'
+      printf 'META\tpid\t1\n'
+      printf 'META\tphase_cur\t1\n'
+      for p in $(seq 1 10); do
+        printf 'PHASE\t%s\trunning\t1\tpass pass run pending\tFase numero %s\n' "$p" "$p"
+        for t in $(seq 1 3); do
+          printf 'TASK\t%s\t%s\tpending\tTask %s da fase %s\n' "$p" "$t" "$t" "$p"
+        done
+      done
+    } > "$d/repo/.phases/state/run.tsv"
+
+    # --embedded desenha na tela normal, sem tela alternativa: e o modo do
+    # --dashboard e o unico onde o pane guarda o que foi realmente desenhado.
+    tmux kill-session -t ralph-frame-test 2>/dev/null || true
+    tmux new-session -d -s ralph-frame-test -x 120 -y 16 \
+      "bash '$WATCH' --embedded --interval 1 '$d/repo'" 2>/dev/null || true
+    sleep 4
+    tmux capture-pane -p -t ralph-frame-test > "$d/pane.txt" 2>/dev/null || true
+    tmux kill-session -t ralph-frame-test 2>/dev/null || true
+
+    # O topo do painel tem de estar no topo da TELA. Rolagem empurra o "RALPH"
+    # para fora e a primeira linha passa a ser um trecho do meio do quadro.
+    if [ -s "$d/pane.txt" ]; then
+      head_txt=$(head -3 "$d/pane.txt")
+      if printf '%s' "$head_txt" | grep -q 'RALPH'; then
+        ok "tela baixa: o topo do painel nao rolou para fora"
+      else
+        bad "tela baixa: o topo rolou (primeiras linhas: $(head -1 "$d/pane.txt" | cut -c1-40))"
+      fi
+      lines=$(grep -c '' "$d/pane.txt")
+      if [ "$lines" -le 16 ]; then ok "tela baixa: painel dentro das 16 linhas ($lines)"
+      else bad "tela baixa: painel ocupou $lines linhas de 16"; fi
+    else
+      ok "tmux nao devolveu pane (ambiente sem tty) — integracao pulada"
+    fi
+  else
+    ok "tmux ausente — integracao do quadro pulada"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$FAIL" -eq 0 ]; then

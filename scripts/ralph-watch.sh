@@ -161,34 +161,60 @@ read_state() {
 # Primitivas de desenho
 # ---------------------------------------------------------------------------
 
+# As funcoes *_v escrevem o resultado na variavel nomeada em $1 em vez de na
+# saida: `printf -v` nao abre subshell, e e isso que permite montar uma linha da
+# tabela sem os ~15 forks que o `$(pad ...)` custava. O build_rows monta TODAS as
+# linhas a cada frame, entao ali a diferenca e de ~500ms para alguns ms por
+# quadro — e o quadro e redesenhado tambem a cada tecla de rolagem.
+#
+# Toda variavel interna daqui leva prefixo __: o destino vem do chamador, e um
+# `pad_v out ...` com um `local out` aqui dentro escreveria na local da funcao em
+# vez da do chamador — falha silenciosa, com a saida saindo vazia.
+
+# pad_v <destino> <texto> <largura> — o pad, escrevendo numa variavel.
+pad_v() {
+  local __s="$2" __w="$3" __n
+  __n=${#2}
+  if [ "$__n" -gt "$__w" ]; then
+    if [ "$__w" -gt 1 ]; then __s="${__s:0:__w-1}…"; else __s="${__s:0:__w}"; fi
+    __n=$__w
+  fi
+  printf -v "$1" '%s%*s' "$__s" $((__w - __n)) ''
+}
+
 # pad <texto> <largura> — trunca com reticencia ou completa com espacos.
 # Em locale UTF-8 ${#s} conta caracteres, nao bytes: e o que mantem o
 # alinhamento das colunas com acentos e box-drawing.
 pad() {
-  local s="$1" w="$2" n
-  n=${#s}
-  if [ "$n" -gt "$w" ]; then
-    if [ "$w" -gt 1 ]; then s="${s:0:w-1}…"; else s="${s:0:w}"; fi
-    n=$w
-  fi
-  printf '%s%*s' "$s" $((w - n)) ''
+  local REPLY_PAD
+  pad_v REPLY_PAD "$1" "$2"
+  printf '%s' "$REPLY_PAD"
 }
 
-repeat() { local ch="$1" n="$2" out="" i; for ((i=0; i<n; i++)); do out+="$ch"; done; printf '%s' "$out"; }
-
-bar() {
-  local done_n="$1" total="$2" width="$3"
-  local filled=0
-  [ "$total" -gt 0 ] && filled=$(( done_n * width / total ))
-  [ "$filled" -gt "$width" ] && filled=$width
-  printf '%s%s%s%s%s' \
-    "$C_GREEN" "$(repeat '█' "$filled")" "$C_GREY" "$(repeat '░' $((width - filled)))" "$C_RESET"
+# cell_v <destino> <colorido> <plain> <largura> — celula colorida com padding
+# correto: mede o texto SEM ANSI (plain) e completa a diferenca. Colorir depois
+# de padear inflaria a largura visivel, porque o ANSI conta em ${#s}.
+cell_v() {
+  local __n=${#3}
+  if [ "$__n" -gt "$4" ]; then pad_v "$1" "$3" "$4"; return; fi
+  printf -v "$1" '%s%*s' "$2" $(( $4 - __n )) ''
 }
 
-pct() {
-  local n="$1" total="$2"
-  [ "$total" -gt 0 ] || { printf '0%%'; return; }
-  printf '%d%%' $(( n * 100 / total ))
+repeat_v() { local __ch="$2" __n="$3" __out="" __i; for ((__i=0; __i<__n; __i++)); do __out+="$__ch"; done; printf -v "$1" '%s' "$__out"; }
+
+bar_v() { # <destino> <feito> <total> <largura>
+  local __done="$2" __total="$3" __width="$4"
+  local __filled=0 __f __e
+  [ "$__total" -gt 0 ] && __filled=$(( __done * __width / __total ))
+  [ "$__filled" -gt "$__width" ] && __filled=$__width
+  repeat_v __f '█' "$__filled"
+  repeat_v __e '░' $(( __width - __filled ))
+  printf -v "$1" '%s%s%s%s%s' "$C_GREEN" "$__f" "$C_GREY" "$__e" "$C_RESET"
+}
+
+pct_v() { # <destino> <n> <total>
+  if [ "$3" -gt 0 ]; then printf -v "$1" '%d%%' $(( $2 * 100 / $3 ))
+  else printf -v "$1" '0%%'; fi
 }
 
 fmt_duration() {
@@ -242,20 +268,41 @@ gate_mark_plain() {
   esac
 }
 
-gates_cell() {
-  local spec="$1" colored="$2"
-  local -a g
-  read -r -a g <<< "$spec"
-  local i out=""
-  for i in 0 1 2 3; do
-    [ "$i" -gt 0 ] && out+=" "
-    if [ "$colored" = "1" ]; then
-      out+="${C_GREY}G$i${C_RESET} $(gate_mark "${g[$i]:-pending}")"
+# Rotulos memoizados. O vocabulario e fechado (6 status, 5 marcas de gate), e as
+# funcoes acima continuam sendo a unica fonte de verdade: a tabela e derivada
+# delas uma vez no startup, entao mudar um rotulo continua sendo mexer em um
+# lugar so. Quem monta linha le da tabela e nao paga fork nenhum.
+declare -A ST_LABEL ST_PLAIN GM_LABEL GM_PLAIN
+init_labels() {
+  local s
+  for s in done running failed incomplete skipped pending; do
+    ST_LABEL[$s]=$(status_label "$s")
+    ST_PLAIN[$s]=$(status_plain "$s")
+  done
+  for s in pass fail run skip pending; do
+    GM_LABEL[$s]=$(gate_mark "$s")
+    GM_PLAIN[$s]=$(gate_mark_plain "$s")
+  done
+}
+init_labels
+
+# gates_cell_v <destino> <spec> <colorido:0|1> — o gates_cell sem subshell.
+gates_cell_v() {
+  # splitting direto no lugar de `read -r -a`: o spec vem do vocabulario fechado
+  # de gates (pending|run|pass|fail|skip), sem espaco nem metacaractere de glob.
+  # shellcheck disable=SC2206
+  local -a __g=( $2 )
+  local __i __out="" __st
+  for __i in 0 1 2 3; do
+    [ "$__i" -gt 0 ] && __out+=" "
+    __st="${__g[$__i]:-pending}"
+    if [ "$3" = "1" ]; then
+      __out+="${C_GREY}G$__i${C_RESET} ${GM_LABEL[$__st]:-${GM_LABEL[pending]}}"
     else
-      out+="G$i $(gate_mark_plain "${g[$i]:-pending}")"
+      __out+="G$__i ${GM_PLAIN[$__st]:-${GM_PLAIN[pending]}}"
     fi
   done
-  printf '%s' "$out"
+  printf -v "$1" '%s' "$__out"
 }
 
 # ---------------------------------------------------------------------------
@@ -331,15 +378,21 @@ calc_height() {
   [ "$H" -lt 12 ] && H=12
 }
 
-box_top() {
-  local w="$1" title="$2" pre
-  pre=$(( (w - ${#title} - 2) / 2 ))
-  printf '%s┌%s %s %s┐%s\n' \
-    "$C_CYAN" "$(repeat '─' "$pre")" "$title" \
-    "$(repeat '─' $(( w - pre - ${#title} - 2 )))" "$C_RESET"
+# As versoes _v nao levam o \n final: quem monta os dois boxes lado a lado
+# precisa das bordas como texto, nao como linha impressa.
+box_top_v() { # <destino> <largura> <titulo>
+  local __w="$2" __title="$3" __pre __l __r
+  __pre=$(( (__w - ${#__title} - 2) / 2 ))
+  repeat_v __l '─' "$__pre"
+  repeat_v __r '─' $(( __w - __pre - ${#__title} - 2 ))
+  printf -v "$1" '%s┌%s %s %s┐%s' "$C_CYAN" "$__l" "$__title" "$__r" "$C_RESET"
 }
 
-box_bottom() { printf '%s└%s┘%s\n' "$C_CYAN" "$(repeat '─' "$1")" "$C_RESET"; }
+box_bottom_v() { # <destino> <largura>
+  local __b
+  repeat_v __b '─' "$2"
+  printf -v "$1" '%s└%s┘%s' "$C_CYAN" "$__b" "$C_RESET"
+}
 
 phase_counts() {
   local num
@@ -415,32 +468,43 @@ draw_panels() {
   local bw=$(( li - 26 ))
   [ "$bw" -lt 8 ] && bw=8
 
-  local l1 l2
-  l1=$(printf 'Fases  %s  [%s]  %s' "$(pad "$PH_DONE/$PH_TOTAL" 7)" "$(bar "$PH_DONE" "$PH_TOTAL" "$bw")" "$(pct "$PH_DONE" "$PH_TOTAL")")
-  l2=$(printf 'Tasks  %s  [%s]  %s' "$(pad "$TK_DONE/$TK_TOTAL" 7)" "$(bar "$TK_DONE" "$TK_TOTAL" "$bw")" "$(pct "$TK_DONE" "$TK_TOTAL")")
-  L+=("$l1"); LP+=("$(printf 'Fases  %s  [%s]  %s' "$(pad "$PH_DONE/$PH_TOTAL" 7)" "$(repeat ' ' "$bw")" "$(pct "$PH_DONE" "$PH_TOTAL")")")
-  L+=("$l2"); LP+=("$(printf 'Tasks  %s  [%s]  %s' "$(pad "$TK_DONE/$TK_TOTAL" 7)" "$(repeat ' ' "$bw")" "$(pct "$TK_DONE" "$TK_TOTAL")")")
+  local l1 l2 p_ph p_tk n_ph n_tk b_ph b_tk blank tmp
+  pad_v n_ph "$PH_DONE/$PH_TOTAL" 7
+  pad_v n_tk "$TK_DONE/$TK_TOTAL" 7
+  pct_v p_ph "$PH_DONE" "$PH_TOTAL"
+  pct_v p_tk "$TK_DONE" "$TK_TOTAL"
+  bar_v b_ph "$PH_DONE" "$PH_TOTAL" "$bw"
+  bar_v b_tk "$TK_DONE" "$TK_TOTAL" "$bw"
+  repeat_v blank ' ' "$bw"
+
+  printf -v l1 'Fases  %s  [%s]  %s' "$n_ph" "$b_ph" "$p_ph"
+  printf -v l2 'Tasks  %s  [%s]  %s' "$n_tk" "$b_tk" "$p_tk"
+  L+=("$l1"); printf -v tmp 'Fases  %s  [%s]  %s' "$n_ph" "$blank" "$p_ph"; LP+=("$tmp")
+  L+=("$l2"); printf -v tmp 'Tasks  %s  [%s]  %s' "$n_tk" "$blank" "$p_tk"; LP+=("$tmp")
   L+=(""); LP+=("")
-  L+=("$(printf '%sTeste:%s %s' "$C_GREY" "$C_RESET" "${META[test_cmd]:-—}")")
-  LP+=("$(printf 'Teste: %s' "${META[test_cmd]:-—}")")
+  printf -v tmp '%sTeste:%s %s' "$C_GREY" "$C_RESET" "${META[test_cmd]:-—}"; L+=("$tmp")
+  printf -v tmp 'Teste: %s' "${META[test_cmd]:-—}"; LP+=("$tmp")
 
   local cur="${META[phase_cur]:-}"
   local fase_txt="—"
   [ -n "$cur" ] && fase_txt="$cur · ${PH_TITLE[$cur]:-}"
 
-  R+=("$(printf '%sFase:%s      %s' "$C_CYAN" "$C_RESET" "$fase_txt")")
-  RP+=("$(printf 'Fase:      %s' "$fase_txt")")
-  R+=("$(printf '%sCiclo:%s     %s    %sGate:%s %s' "$C_CYAN" "$C_RESET" "${META[cycle]:-—}/${META[cycle_max]:-—}" "$C_CYAN" "$C_RESET" "${META[gate]:-—}")")
-  RP+=("$(printf 'Ciclo:     %s    Gate: %s' "${META[cycle]:-—}/${META[cycle_max]:-—}" "${META[gate]:-—}")")
-  R+=("$(printf '%sAtividade:%s %s' "$C_CYAN" "$C_RESET" "${META[activity]:-—}")")
-  RP+=("$(printf 'Atividade: %s' "${META[activity]:-—}")")
-  R+=("$(printf '%sÚltimo erro:%s %s%s%s' "$C_CYAN" "$C_RESET" "$C_RED" "${META[last_error]:-—}" "$C_RESET")")
-  RP+=("$(printf 'Último erro: %s' "${META[last_error]:-—}")")
+  local cyc="${META[cycle]:-—}/${META[cycle_max]:-—}"
+  printf -v tmp '%sFase:%s      %s' "$C_CYAN" "$C_RESET" "$fase_txt"; R+=("$tmp")
+  printf -v tmp 'Fase:      %s' "$fase_txt"; RP+=("$tmp")
+  printf -v tmp '%sCiclo:%s     %s    %sGate:%s %s' \
+    "$C_CYAN" "$C_RESET" "$cyc" "$C_CYAN" "$C_RESET" "${META[gate]:-—}"; R+=("$tmp")
+  printf -v tmp 'Ciclo:     %s    Gate: %s' "$cyc" "${META[gate]:-—}"; RP+=("$tmp")
+  printf -v tmp '%sAtividade:%s %s' "$C_CYAN" "$C_RESET" "${META[activity]:-—}"; R+=("$tmp")
+  printf -v tmp 'Atividade: %s' "${META[activity]:-—}"; RP+=("$tmp")
+  printf -v tmp '%sÚltimo erro:%s %s%s%s' \
+    "$C_CYAN" "$C_RESET" "$C_RED" "${META[last_error]:-—}" "$C_RESET"; R+=("$tmp")
+  printf -v tmp 'Último erro: %s' "${META[last_error]:-—}"; RP+=("$tmp")
 
   # Cabecalhos e rodapes dos dois boxes, lado a lado
   local top_l top_r bot_l bot_r
-  top_l=$(box_top "$li" "PROGRESSO"); top_r=$(box_top "$ri" "TRABALHO ATUAL")
-  bot_l=$(box_bottom "$li");          bot_r=$(box_bottom "$ri")
+  box_top_v top_l "$li" "PROGRESSO"; box_top_v top_r "$ri" "TRABALHO ATUAL"
+  box_bottom_v bot_l "$li";          box_bottom_v bot_r "$ri"
   printf '%s %s\n' "$top_l" "$top_r"
 
   local i n=${#L[@]}
@@ -448,8 +512,8 @@ draw_panels() {
   for ((i=0; i<n; i++)); do
     local lc="${L[$i]:-}" lp="${LP[$i]:-}" rc="${R[$i]:-}" rp="${RP[$i]:-}"
     # trunca pelo texto sem cor e reaplica o conteudo colorido
-    if [ "${#lp}" -gt $(( li - 2 )) ]; then lc=$(pad "$lp" $(( li - 2 ))); lp="$lc"; fi
-    if [ "${#rp}" -gt $(( ri - 2 )) ]; then rc=$(pad "$rp" $(( ri - 2 ))); rp="$rc"; fi
+    if [ "${#lp}" -gt $(( li - 2 )) ]; then pad_v lc "$lp" $(( li - 2 )); lp="$lc"; fi
+    if [ "${#rp}" -gt $(( ri - 2 )) ]; then pad_v rc "$rp" $(( ri - 2 )); rp="$rc"; fi
     printf '%s│%s %s%*s %s│%s %s│%s %s%*s %s│%s\n' \
       "$C_CYAN" "$C_RESET" "$lc" $(( li - 2 - ${#lp} )) '' "$C_CYAN" "$C_RESET" \
       "$C_CYAN" "$C_RESET" "$rc" $(( ri - 2 - ${#rp} )) '' "$C_CYAN" "$C_RESET"
@@ -474,28 +538,36 @@ build_rows() {
 
   local V="${C_CYAN}│${C_RESET}"
 
-  # Celula colorida com padding correto: mede o texto SEM ANSI (plain) e
-  # completa a diferenca. Colorir depois de padear inflaria a largura visivel.
-  cell() { # <colorido> <plain> <largura>
-    local colored="$1" plain="$2" w="$3" n=${#2}
-    if [ "$n" -gt "$w" ]; then printf '%s' "$(pad "$plain" "$w")"; return; fi
-    printf '%s%*s' "$colored" $(( w - n )) ''
-  }
+  # Os tracinhos de tentativa e gates das linhas de task nao dependem da fase:
+  # padeia uma vez por frame em vez de uma vez por linha.
+  local dash_try dash_gates c_try_tk c_gates_tk
+  pad_v dash_try   '–' "$COL_TRY"
+  pad_v dash_gates '–' "$COL_GATES"
+  cell_v c_try_tk   "${C_GREY}${dash_try}${C_RESET}"   "$dash_try"   "$COL_TRY"
+  cell_v c_gates_tk "${C_GREY}${dash_gates}${C_RESET}" "$dash_gates" "$COL_GATES"
 
   local num i st tries row
+  local t_name c_name c_id c_st c_try g_col g_pln c_gates
   for num in "${PHASE_NUMS[@]}"; do
     st="${PH_STATUS[$num]}"
     tries="${PH_ATTEMPT[$num]}"
     [ "$tries" = "0" ] && tries="–"
 
     PHASE_ROW[$num]=${#ROWS[@]}
+
+    pad_v t_name "${PH_TITLE[$num]}" "$COL_NAME"
+    cell_v c_name "${C_WHITE}${t_name}${C_RESET}" "$t_name" "$COL_NAME"
+    cell_v c_st "${ST_LABEL[$st]:-${ST_LABEL[pending]}}" \
+                "${ST_PLAIN[$st]:-${ST_PLAIN[pending]}}" "$COL_STATUS"
+    pad_v c_id "F$num" "$COL_ID"
+    pad_v c_try "$tries" "$COL_TRY"
+    gates_cell_v g_col "${PH_GATES[$num]}" 1
+    gates_cell_v g_pln "${PH_GATES[$num]}" 0
+    cell_v c_gates "$g_col" "$g_pln" "$COL_GATES"
+
     # a linha guarda tudo menos a borda direita: ali vai a barra de rolagem
-    row=$(printf '%s %s %s %s %s %s %s %s %s %s' "$V" \
-      "$(pad "F$num" $COL_ID)" "$V" \
-      "$(cell "${C_WHITE}$(pad "${PH_TITLE[$num]}" $COL_NAME)${C_RESET}" "$(pad "${PH_TITLE[$num]}" $COL_NAME)" $COL_NAME)" "$V" \
-      "$(cell "$(status_label "$st")" "$(status_plain "$st")" $COL_STATUS)" "$V" \
-      "$(pad "$tries" $COL_TRY)" "$V" \
-      "$(cell "$(gates_cell "${PH_GATES[$num]}" 1)" "$(gates_cell "${PH_GATES[$num]}" 0)" $COL_GATES)")
+    printf -v row '%s %s %s %s %s %s %s %s %s %s' "$V" \
+      "$c_id" "$V" "$c_name" "$V" "$c_st" "$V" "$c_try" "$V" "$c_gates"
     ROWS+=("$row")
     if [ "$st" = "running" ]; then
       ROW_HL+=("$C_HILITE")
@@ -504,16 +576,16 @@ build_rows() {
       ROW_HL+=("")
     fi
 
-    local tst ttitle
+    local tst ttitle t_id
     for ((i=1; i<=${TK_COUNT[$num]:-0}; i++)); do
       tst="${TK_STATUS[$num:$i]:-pending}"
-      ttitle=$(pad "  ↳ ${TK_TITLE[$num:$i]}" $COL_NAME)
-      row=$(printf '%s %s %s %s %s %s %s %s %s %s' "$V" \
-        "$(cell "${C_GREY}$(pad "T$i" $COL_ID)${C_RESET}" "$(pad "T$i" $COL_ID)" $COL_ID)" "$V" \
-        "$ttitle" "$V" \
-        "$(cell "$(status_label "$tst")" "$(status_plain "$tst")" $COL_STATUS)" "$V" \
-        "$(cell "${C_GREY}$(pad '–' $COL_TRY)${C_RESET}" "$(pad '–' $COL_TRY)" $COL_TRY)" "$V" \
-        "$(cell "${C_GREY}$(pad '–' $COL_GATES)${C_RESET}" "$(pad '–' $COL_GATES)" $COL_GATES)")
+      pad_v ttitle "  ↳ ${TK_TITLE[$num:$i]}" "$COL_NAME"
+      pad_v t_id "T$i" "$COL_ID"
+      cell_v c_id "${C_GREY}${t_id}${C_RESET}" "$t_id" "$COL_ID"
+      cell_v c_st "${ST_LABEL[$tst]:-${ST_LABEL[pending]}}" \
+                  "${ST_PLAIN[$tst]:-${ST_PLAIN[pending]}}" "$COL_STATUS"
+      printf -v row '%s %s %s %s %s %s %s %s %s %s' "$V" \
+        "$c_id" "$V" "$ttitle" "$V" "$c_st" "$V" "$c_try_tk" "$V" "$c_gates_tk"
       ROWS+=("$row")
       if [ "$tst" = "running" ]; then
         ROW_HL+=("$C_HILITE")
@@ -567,6 +639,9 @@ build_frame() {
   TOTAL=${#ROWS[@]}
 
   local head_n note_n=0 avail
+  # `| wc -l` custa um fork, mas contar em bash puro sai MAIS caro: a
+  # substituicao ${HEAD//[^$'\n']/} avalia a classe caractere a caractere e
+  # mediu 44ms contra 2ms do wc num HEAD de 2KB. Fork nao e sempre o vilao.
   head_n=$(printf '%s\n' "$HEAD" | wc -l)
   [ -n "${META[note]:-}" ] && note_n=2
 
@@ -590,52 +665,65 @@ build_frame() {
 }
 
 # Borda direita da linha visivel i: vira barra de rolagem quando ha corte.
-scroll_edge() {
-  local i="$1"
+# Chamada uma vez por linha desenhada, entao a versao _v (sem subshell) importa:
+# era um fork por linha da tabela, a cada frame e a cada tecla de rolagem.
+scroll_edge_v() { # <destino> <indice da linha>
+  local __i="$2"
   if [ "$FOOTER" -eq 0 ]; then
-    printf '%s│%s' "$C_CYAN" "$C_RESET"
+    printf -v "$1" '%s│%s' "$C_CYAN" "$C_RESET"
     return
   fi
-  local th top rel
-  th=$(( VIS * VIS / TOTAL )); [ "$th" -lt 1 ] && th=1
-  top=0
-  [ "$MAX_OFF" -gt 0 ] && top=$(( OFF * (VIS - th) / MAX_OFF ))
-  rel=$(( i - OFF ))
-  if [ "$rel" -ge "$top" ] && [ "$rel" -lt $(( top + th )) ]; then
-    printf '%s█%s' "$C_CYAN" "$C_RESET"
+  local __th __top __rel
+  __th=$(( VIS * VIS / TOTAL )); [ "$__th" -lt 1 ] && __th=1
+  __top=0
+  [ "$MAX_OFF" -gt 0 ] && __top=$(( OFF * (VIS - __th) / MAX_OFF ))
+  __rel=$(( __i - OFF ))
+  if [ "$__rel" -ge "$__top" ] && [ "$__rel" -lt $(( __top + __th )) ]; then
+    printf -v "$1" '%s█%s' "$C_CYAN" "$C_RESET"
   else
-    printf '%s│%s' "$C_GREY" "$C_RESET"
+    printf -v "$1" '%s│%s' "$C_GREY" "$C_RESET"
   fi
 }
 
 draw_table() {
+  local r_id r_name r_status r_try r_gates
+  repeat_v r_id     '─' $((COL_ID+2))
+  repeat_v r_name   '─' $((COL_NAME+2))
+  repeat_v r_status '─' $((COL_STATUS+2))
+  repeat_v r_try    '─' $((COL_TRY+2))
+  repeat_v r_gates  '─' $((COL_GATES+2))
+
   local sep_t sep_m sep_b
-  sep_t=$(printf '%s┌%s┬%s┬%s┬%s┬%s┐%s' "$C_CYAN" \
-    "$(repeat '─' $((COL_ID+2)))" "$(repeat '─' $((COL_NAME+2)))" "$(repeat '─' $((COL_STATUS+2)))" \
-    "$(repeat '─' $((COL_TRY+2)))" "$(repeat '─' $((COL_GATES+2)))" "$C_RESET")
-  sep_m=$(printf '%s├%s┼%s┼%s┼%s┼%s┤%s' "$C_CYAN" \
-    "$(repeat '─' $((COL_ID+2)))" "$(repeat '─' $((COL_NAME+2)))" "$(repeat '─' $((COL_STATUS+2)))" \
-    "$(repeat '─' $((COL_TRY+2)))" "$(repeat '─' $((COL_GATES+2)))" "$C_RESET")
-  sep_b=$(printf '%s└%s┴%s┴%s┴%s┴%s┘%s' "$C_CYAN" \
-    "$(repeat '─' $((COL_ID+2)))" "$(repeat '─' $((COL_NAME+2)))" "$(repeat '─' $((COL_STATUS+2)))" \
-    "$(repeat '─' $((COL_TRY+2)))" "$(repeat '─' $((COL_GATES+2)))" "$C_RESET")
+  printf -v sep_t '%s┌%s┬%s┬%s┬%s┬%s┐%s' "$C_CYAN" \
+    "$r_id" "$r_name" "$r_status" "$r_try" "$r_gates" "$C_RESET"
+  printf -v sep_m '%s├%s┼%s┼%s┼%s┼%s┤%s' "$C_CYAN" \
+    "$r_id" "$r_name" "$r_status" "$r_try" "$r_gates" "$C_RESET"
+  printf -v sep_b '%s└%s┴%s┴%s┴%s┴%s┘%s' "$C_CYAN" \
+    "$r_id" "$r_name" "$r_status" "$r_try" "$r_gates" "$C_RESET"
 
   local V="${C_CYAN}│${C_RESET}"
 
+  local h_id h_name h_status h_try h_gates
+  pad_v h_id     'ID'          "$COL_ID"
+  pad_v h_name   'Fase / Task' "$COL_NAME"
+  pad_v h_status 'Status'      "$COL_STATUS"
+  pad_v h_try    'Tentativa'   "$COL_TRY"
+  pad_v h_gates  'Gates'       "$COL_GATES"
+
   printf '%s\n' "$sep_t"
   printf '%s %s %s %s %s %s %s %s %s %s %s\n' "$V" \
-    "${C_CYAN}$(pad 'ID' $COL_ID)${C_RESET}" "$V" \
-    "${C_CYAN}$(pad 'Fase / Task' $COL_NAME)${C_RESET}" "$V" \
-    "${C_CYAN}$(pad 'Status' $COL_STATUS)${C_RESET}" "$V" \
-    "${C_CYAN}$(pad 'Tentativa' $COL_TRY)${C_RESET}" "$V" \
-    "${C_CYAN}$(pad 'Gates' $COL_GATES)${C_RESET}" "$V"
+    "${C_CYAN}${h_id}${C_RESET}" "$V" \
+    "${C_CYAN}${h_name}${C_RESET}" "$V" \
+    "${C_CYAN}${h_status}${C_RESET}" "$V" \
+    "${C_CYAN}${h_try}${C_RESET}" "$V" \
+    "${C_CYAN}${h_gates}${C_RESET}" "$V"
   printf '%s\n' "$sep_m"
 
   local i hl body edge
   for ((i=OFF; i<OFF+VIS && i<TOTAL; i++)); do
     hl="${ROW_HL[$i]}"
     body="${ROWS[$i]}"
-    edge=$(scroll_edge "$i")
+    scroll_edge_v edge "$i"
     if [ -n "$hl" ]; then
       # C_RESET (\033[0m) zera tambem o fundo. Sem reinjetar o realce depois de
       # cada reset, o destaque da linha em execucao morria no primeiro separador
@@ -672,6 +760,25 @@ render() {
   if [ -n "${META[note]:-}" ]; then
     printf '\n%s%s%s\n' "$C_YELLOW" "${META[note]}" "$C_RESET"
   fi
+}
+
+# clamp_lines <destino> <texto> <max> — corta o texto nas primeiras <max> linhas
+# e sem \n no fim. Rede de seguranca do desenho: um frame com mais linhas que a
+# tela faz o terminal ROLAR, e a partir dai o \033[H passa a escrever numa tela
+# deslocada — o topo do quadro anterior fica para tras e nenhum \033[K alcanca,
+# so o \033[2J do redimensionamento. Acontece de verdade em terminal baixo: o
+# piso de 3 linhas de tabela mantem o frame em 20 linhas mesmo numa tela de 12.
+# Cortar o rodape e feio; rolar corrompe o painel inteiro e nao se recupera.
+clamp_lines() {
+  local __s="$2" __max="$3" __out="" __n=0
+  while [ "$__n" -lt "$__max" ]; do
+    case "$__s" in
+      *$'\n'*) __out+="${__s%%$'\n'*}"$'\n'; __s="${__s#*$'\n'}" ;;
+      *)       __out+="$__s"; __s=""; break ;;
+    esac
+    __n=$(( __n + 1 ))
+  done
+  printf -v "$1" '%s' "${__out%$'\n'}"
 }
 
 # ---------------------------------------------------------------------------
@@ -737,6 +844,11 @@ handle_key() { # <char lido>
   esac
 }
 
+# Teto de teclas absorvidas num tick. Segurar uma tecla ou colar texto pode
+# encher o buffer; alem disso desenha o que ja acumulou e volta na proxima volta,
+# para o painel nao parar de atualizar enquanto drena.
+DRAIN_MAX=64
+
 # Espera INTERVAL segundos, mas acorda na hora se o usuario apertar algo — e o
 # que faz a rolagem responder sem esperar o proximo frame.
 wait_tick() {
@@ -749,6 +861,18 @@ wait_tick() {
   rc=$?
   if [ "$rc" -eq 0 ]; then
     handle_key "$c"
+    # Drena o resto do buffer antes de devolver o controle ao loop. Sem isso o
+    # autorepeat do terminal enfileirava dezenas de eventos e cada um pagava um
+    # frame inteiro: a rolagem chegava ao destino muito depois da tecla soltar.
+    # Absorve tudo que ja esta pendente e deixa o loop desenhar UM frame com o
+    # deslocamento final. O -t curto e o que distingue "buffer vazio" de "ainda
+    # chegando"; `read -t 0` nao serve, porque testa sem consumir o byte.
+    local drained=0
+    while [ "$drained" -lt "$DRAIN_MAX" ] \
+      && IFS= read -rsn1 -t 0.01 -u "$KEY_FD" c; do
+      handle_key "$c"
+      drained=$(( drained + 1 ))
+    done
   elif [ "$rc" -le 128 ] && [ ! -t "$KEY_FD" ]; then
     # Nao foi timeout e o fd nao e mais um terminal: o tty sumiu de verdade.
     # (Um sinal — SIGWINCH ao redimensionar — tambem interrompe o read; ali o
@@ -794,18 +918,31 @@ main() {
         printf '\033[2J'
         LAST_W=$W; LAST_H=$H; RESIZED=false
       fi
-      printf '\033[H%s\033[J' "$frame"
+      # Nunca imprime mais linhas do que a tela tem: ver clamp_lines.
+      clamp_lines frame "$frame" "$H"
+      # \033[K no INICIO de cada linha: \033[J so limpa do fim do frame para
+      # baixo, entao uma linha nova mais curta que a antiga deixava o rabo dela
+      # na tela e uma linha nova EM BRANCO nao apagava nada. O cabecalho tem tres
+      # linhas em branco e o "RALPH" e curto: eram justamente as quatro posicoes
+      # onde o quadro anterior aparecia por baixo do novo, e o lixo ficava ali
+      # ate alguem redimensionar a janela.
+      # No inicio e nao no fim da linha: W e a largura cheia do terminal, e uma
+      # linha de exatamente W colunas deixa o cursor com wrap pendente na ultima
+      # coluna — um \033[K ali apagaria o proprio caractere que acabou de sair.
+      printf '\033[H%s\033[J' $'\033[K'"${frame//$'\n'/$'\n\033[K'}"
       case "${META[status]:-running}" in
         finished|failed)
           $EMBEDDED && break
           ;;
       esac
     else
-      printf '\033[H%sAguardando o ralph iniciar (%s)…%s\033[J\n' "$C_GREY" "$RUN_STATE" "$C_RESET"
+      printf '\033[H\033[K%sAguardando o ralph iniciar (%s)…%s\033[J\n' "$C_GREY" "$RUN_STATE" "$C_RESET"
     fi
     wait_tick
     $QUIT && break
   done
 }
 
-main
+# Mesma convencao do ralph.sh: RALPH_LIB_ONLY=1 carrega as funcoes sem desenhar,
+# para a suite testar unidades (ex: clamp_lines) sem precisar de um terminal.
+[ "${RALPH_LIB_ONLY:-0}" = "1" ] || main
